@@ -3,14 +3,14 @@ version: '3.8'
 services:
   mongodb:
     image: mongo:6
-    container_name: blackfox-mongodb
+    container_name: cloakerguard-mongodb
     restart: always
     ports:
-      - "27017:27017"
+      - '27017:27017'
     volumes:
       - mongodb_data:/data/db
     environment:
-      MONGO_INITDB_DATABASE: blackfox
+      MONGO_INITDB_DATABASE: cloakerguard
 
 volumes:
   mongodb_data:
