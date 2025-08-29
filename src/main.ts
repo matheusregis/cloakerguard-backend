@@ -7,10 +7,18 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
   app.useGlobalPipes(new ValidationPipe());
 
+  const allowed = [
+    'http://localhost:8080',
+    'https://cloakerguard.com.br',
+    'https://www.cloakerguard.com.br',
+    'https://api.cloakerguard.com.br', // se houver chamadas entre serviços
+  ];
+
   app.enableCors({
-    origin: 'http://localhost:8080',
+    origin: (origin, cb) => cb(null, !origin || allowed.includes(origin)),
     credentials: true,
   });
+
   await app.listen(process.env.PORT || 3000);
   logger.log(`🚀 Aplicação rodando na porta ${process.env.PORT || 3000}`);
 }
