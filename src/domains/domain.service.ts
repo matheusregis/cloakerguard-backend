@@ -17,7 +17,7 @@ export class DomainService {
   private readonly zoneId = process.env.CLOUDFLARE_ZONE_ID!;
   // host/record de origem do seu edge/reverse-proxy por trás da Cloudflare
   private readonly EDGE_ORIGIN =
-    process.env.CLOAKER_EDGE_ORIGIN || 'edge.autochecking.com.br';
+    process.env.CLOAKER_EDGE_ORIGIN || 'cloakerguard.com.br';
   private readonly HEALTH_SCHEME = process.env.HEALTHCHECK_SCHEME || 'https';
   private readonly HEALTH_PATH = process.env.HEALTHCHECK_PATH || '/__health';
 
@@ -36,13 +36,13 @@ export class DomainService {
     return (v || '').trim().toLowerCase().replace(/\.$/, '');
   }
 
-  // gera o subdomínio interno: <slug>-<userId>.autochecking.com.br
+  // gera o subdomínio interno: <slug>-<userId>.cloakerguard.com.br
   private computeSubdomain(externalFqdn: string, userId: string) {
     const host = this.n(externalFqdn)
       .split('.')[0]
       .replace(/[^a-z0-9-]/g, '');
     const label = `${host}-${userId}`.replace(/[^a-z0-9-]/g, '');
-    return `${label}.autochecking.com.br`;
+    return `${label}.cloakerguard.com.br`;
   }
 
   async createDomain(dto: CreateDNSRecordDto, userId: string) {
@@ -51,7 +51,7 @@ export class DomainService {
     // dto.name vem como FQDN externo (ex: teste.promocao.com.br)
     const externalFqdn = this.n(dto.name);
     const subdomain = this.computeSubdomain(externalFqdn, userId); // nosso alvo
-    const subLabel = subdomain.replace('.autochecking.com.br', ''); // label dentro da zona
+    const subLabel = subdomain.replace('.cloakerguard.com.br', ''); // label dentro da zona
 
     // Criamos na nossa zona um CNAME <subLabel> -> EDGE_ORIGIN
     const response: CloudflareDNSResult =
@@ -89,7 +89,7 @@ export class DomainService {
 
     // IMPORTANTE:
     // Não alteramos o "name" do registro da Cloudflare para o FQDN externo do cliente.
-    // Nosso registro na zona é o "subdomain" (ex: teste-uid.autochecking.com.br).
+    // Nosso registro na zona é o "subdomain" (ex: teste-uid.cloakerguard.com.br).
     const dnsRecord = await this.cloudflareService.getDNSRecordId(
       domain.subdomain,
       {

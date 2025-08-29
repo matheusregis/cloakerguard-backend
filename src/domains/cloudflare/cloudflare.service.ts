@@ -65,7 +65,7 @@ export class CloudflareService {
     });
 
     const defaultZoneId = process.env.CLOUDFLARE_ZONE_ID;
-    const defaultApex = process.env.CLOUDFLARE_ZONE_NAME; // ex: "autochecking.com.br"
+    const defaultApex = process.env.CLOUDFLARE_ZONE_NAME; // ex: "cloakerguard.com.br"
     if (defaultZoneId && defaultApex)
       this.zoneCache.set(defaultApex, defaultZoneId);
   }
