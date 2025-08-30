@@ -6,16 +6,58 @@ import {
   Post,
   Put,
   Delete,
+  Query,
+  NotFoundException,
 } from '@nestjs/common';
 import { DomainService } from './domain.service';
 import { CreateDNSRecordDto } from './dto/create-dns.dto';
 import { UpdateDNSRecordDto } from './dto/update-dns.dto';
 import { Domain, DomainDocument } from './schemas/domain.schema';
 
+function normalizeHost(raw = ''): string {
+  let h = raw.split(',')[0].trim().toLowerCase();
+  h = h.replace(/:\d+$/, '');
+  h = h.replace(/^\[([^[\]]+)\](:\d+)?$/, '[$1]');
+  return h;
+}
+
 @Controller('domains')
 export class DomainController {
-  // <<< named export
   constructor(private readonly domainService: DomainService) {}
+
+  @Get('resolve')
+  async resolve(@Query('host') host?: string) {
+    const h = normalizeHost(host || '');
+    if (!h) throw new NotFoundException('host query is required');
+
+    // tenta por host/name/subdomain (ajuste conforme seu DomainService)
+    const domain =
+      (await (this.domainService as any).findByHost?.(h)) ||
+      (await (this.domainService as any).findByName?.(h)) ||
+      (await this.domainService.findBySubdomain(h)) ||
+      null;
+
+    if (!domain) throw new NotFoundException('Domain not found');
+
+    // mapeia campos possíveis (ajuste se seus nomes diferirem)
+    const white =
+      (domain.whiteOrigin as string) ||
+      (domain.whiteUrl as string) ||
+      (domain.white as string) ||
+      '';
+    const black =
+      (domain.blackOrigin as string) ||
+      (domain.blackUrl as string) ||
+      (domain.black as string) ||
+      '';
+
+    return {
+      host: domain.host || domain.name || h,
+      whiteOrigin: white || null,
+      blackOrigin: black || null,
+      rules: domain.rules || {},
+    };
+  }
 
   @Post(':clientId')
   async createDomain(
@@ -25,14 +67,15 @@ export class DomainController {
     return this.domainService.createDomain(body, clientId);
   }
 
-  @Get(':clientId')
+  // ⚠️ ALTERADO para não colidir com /resolve
+  @Get('client/:clientId')
   async getClientDomains(
     @Param('clientId') clientId: string,
   ): Promise<Domain[]> {
     return this.domainService.findAllByUser(clientId);
   }
 
-  @Get('/subdomain/:subdomain')
+  @Get('subdomain/:subdomain')
   async getBySubdomain(
     @Param('subdomain') subdomain: string,
   ): Promise<Domain | null> {
