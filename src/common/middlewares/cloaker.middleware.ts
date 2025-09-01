@@ -27,38 +27,54 @@ export class CloakerMiddleware implements NestMiddleware {
 
   async use(req: Request, res: Response, next: NextFunction) {
     try {
-      const hostHdr = (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
+      // PRIORIDADE: X-Forwarded-Host -> Host
+      const hostHdr =
+        (req.headers['x-forwarded-host'] as string) ||
+        (req.headers.host as string) ||
+        '';
       const host = normalizeHost(hostHdr);
 
-      // 🔧 TENTA pelos dois campos (subdomain OU name)
+      // tenta name/host/subdomain
       const domain =
-        (await this.domainService.findByHost?.(host)) ||
+        (await (this.domainService as any).findByHost?.(host)) ||
+        (await (this.domainService as any).findByName?.(host)) ||
         (await this.domainService.findBySubdomain(host)) ||
         null;
 
+      // não é domínio gerenciado? segue
       if (!domain) return next();
 
       const xfwd = (req.headers['x-forwarded-for'] as string) || '';
       const ip = (xfwd.split(',')[0] || req.socket.remoteAddress || '').trim();
-
       const ua = (req.headers['user-agent'] as string) || '';
       const referer =
         (req.headers['referer'] as string) ||
         (req.headers['referrer'] as string) ||
         '';
 
-      const isBot = /bot|crawl|slurp|spider|mediapartners|facebookexternalhit/i.test(ua);
+      // regra padrão; pode vir da sua DB via domain.rules.uaBlock
+      const isBot =
+        (domain?.rules?.uaBlock &&
+          new RegExp((domain as any).rules.uaBlock, 'i').test(ua)) ||
+        /bot|crawl|slurp|spider|mediapartners|facebookexternalhit|headlesschrome|curl/i.test(
+          ua,
+        );
+
       const decision: 'passed' | 'filtered' = isBot ? 'filtered' : 'passed';
-      const reason: 'bot' | 'vpn' | 'geo' | 'asn' | 'ua' | 'manual' | 'unknown' =
-        isBot ? 'bot' : 'unknown';
+      const reason:
+        | 'bot'
+        | 'vpn'
+        | 'geo'
+        | 'asn'
+        | 'ua'
+        | 'manual'
+        | 'unknown' = isBot ? 'bot' : 'unknown';
 
-      const targetRaw = isBot ? (domain as any).whiteUrl : (domain as any).blackUrl;
+      const targetRaw = isBot ? domain.whiteUrl : domain.blackUrl;
       const redirectTo = safeUrl(targetRaw);
-
-      // Sem URL configurada? Não redireciona.
       if (!redirectTo) return next();
 
-      // Evita loop: se destino == host atual, segue request
+      // evita loop: destino == host atual
       try {
         const destHost = normalizeHost(new URL(redirectTo).host);
         if (destHost === host) return next();
@@ -66,6 +82,7 @@ export class CloakerMiddleware implements NestMiddleware {
         return next();
       }
 
+      // logs/analytics assíncronos
       void this.logService.create({
         subdomain: host,
         ip,
@@ -76,9 +93,9 @@ export class CloakerMiddleware implements NestMiddleware {
       });
 
       void this.analytics.recordHit({
-        userId: (domain as any).userId,
-        domainId: String((domain as any)._id),
-        domainName: (domain as any).name,
+        userId: domain.userId,
+        domainId: String(domain._id),
+        domainName: domain.name || host,
         decision,
         reason,
         ip,
