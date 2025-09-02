@@ -71,13 +71,13 @@ export class CloudflareService {
   private readonly logger = new Logger(CloudflareService.name);
   private readonly api: AxiosInstance;
 
-  /** Zona da SUA conta (ex.: cloakerguard.com.br). É aqui que os Custom Hostnames são criados. */
+  /** Zona SaaS (ex.: cloakerguard.com.br) onde os Custom Hostnames são criados */
   private readonly saasZoneId: string | undefined =
     process.env.CLOUDFLARE_ZONE_ID || process.env.CLOUDFLARE_SAAS_ZONE_ID;
   private readonly saasZoneName: string | undefined =
     process.env.CLOUDFLARE_ZONE_NAME;
 
-  /** Cache simples para zoneId por apex (para operações de DNS comuns) */
+  /** Cache opcional de zoneId por apex */
   private readonly zoneCache = new Map<string, string>();
 
   constructor() {
@@ -131,7 +131,7 @@ export class CloudflareService {
     return zoneId;
   }
 
-  /** Resolve zoneId para operações de DNS dentro da ZONA DONA do FQDN. */
+  /** Resolve zoneId para operações de DNS dentro da ZONA dona do FQDN. */
   private async resolveZoneIdForName(
     fqdn: string,
     opts?: { zoneId?: string },
@@ -279,10 +279,7 @@ export class CloudflareService {
 
   // -------------------- Custom Hostnames (SaaS) --------------------
 
-  /**
-   * Cria um Custom Hostname na SUA zona (saasZoneId) com validação HTTP (DV).
-   * Use opts.origin para forçar um origin específico; se omitido, CF usará o Fallback Origin.
-   */
+  /** Cria Custom Hostname com validação HTTP (se você realmente precisar) */
   async createCustomHostnameHTTP(
     hostname: string,
     opts?: { origin?: string; zoneId?: string },
@@ -292,6 +289,32 @@ export class CloudflareService {
       throw new Error('CLOUDFLARE_ZONE_ID (zona SaaS) não configurado');
 
     const body: any = { hostname, ssl: { method: 'http', type: 'dv' } };
+    if (opts?.origin) body.custom_origin_server = opts.origin;
+
+    const res = await this.api.post<CloudflareSingleResponse<CfCustomHostname>>(
+      `/zones/${zoneId}/custom_hostnames`,
+      body,
+    );
+    return res.data.result;
+  }
+
+  /** Cria Custom Hostname com validação TXT (recomendado) */
+  async createCustomHostnameTXT(
+    hostname: string,
+    opts?: { origin?: string; zoneId?: string },
+  ): Promise<CfCustomHostname> {
+    const zoneId = opts?.zoneId || this.saasZoneId;
+    if (!zoneId)
+      throw new Error('CLOUDFLARE_ZONE_ID (zona SaaS) não configurado');
+
+    const body: any = {
+      hostname,
+      ssl: {
+        method: 'txt',
+        type: 'dv',
+      },
+    };
+
     if (opts?.origin) body.custom_origin_server = opts.origin;
 
     const res = await this.api.post<CloudflareSingleResponse<CfCustomHostname>>(
@@ -313,44 +336,6 @@ export class CloudflareService {
     return r.data.result;
   }
 
-  async deleteCustomHostnameById(id: string, zoneId?: string): Promise<void> {
-    const z = zoneId || this.saasZoneId;
-    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
-    await this.api.delete<CloudflareSingleResponse<CfCustomHostname>>(
-      `/zones/${z}/custom_hostnames/${id}`,
-    );
-  }
-
-  async listCustomHostnames(
-    page = 1,
-    perPage = 50,
-    zoneId?: string,
-    search?: { hostname?: string; ssl_status?: string },
-  ): Promise<{
-    items: CfCustomHostname[];
-    total?: number;
-    page: number;
-    perPage: number;
-  }> {
-    const z = zoneId || this.saasZoneId;
-    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
-
-    const params: Record<string, any> = { page, per_page: perPage };
-    if (search?.hostname) params.hostname = search.hostname;
-    if (search?.ssl_status) params['ssl'] = search.ssl_status;
-
-    const r = await this.api.get<CloudflareListResponse<CfCustomHostname>>(
-      `/zones/${z}/custom_hostnames`,
-      { params },
-    );
-    return {
-      items: r.data.result ?? [],
-      total: r.data.result_info?.total_count,
-      page: r.data.result_info?.page ?? page,
-      perPage: r.data.result_info?.per_page ?? perPage,
-    };
-  }
-
   async getCustomHostnameByName(
     hostname: string,
     zoneId?: string,
@@ -366,9 +351,19 @@ export class CloudflareService {
     return res.data.result?.[0] ?? null;
   }
 
+  async deleteCustomHostnameById(id: string, zoneId?: string): Promise<void> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+    await this.api.delete<CloudflareSingleResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames/${id}`,
+    );
+  }
+
+  /** Força reemissão/validação do SSL (padrão = txt; pode escolher http) */
   async updateCustomHostnameSSL(
     id: string,
     zoneId?: string,
+    method: 'txt' | 'http' = 'txt',
   ): Promise<CfCustomHostname> {
     const z = zoneId || this.saasZoneId;
     if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
@@ -376,9 +371,30 @@ export class CloudflareService {
     const res = await this.api.patch<
       CloudflareSingleResponse<CfCustomHostname>
     >(`/zones/${z}/custom_hostnames/${id}`, {
-      ssl: { method: 'http', type: 'dv' },
+      ssl: { method, type: 'dv' },
     });
 
     return res.data.result;
+  }
+
+  /** Lista simples (array) */
+  async listCustomHostnames(
+    page = 1,
+    perPage = 50,
+    zoneId?: string,
+    search?: { hostname?: string; ssl_status?: string },
+  ): Promise<CfCustomHostname[]> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+
+    const params: Record<string, any> = { page, per_page: perPage };
+    if (search?.hostname) params.hostname = search.hostname;
+    if (search?.ssl_status) params['ssl'] = search.ssl_status;
+
+    const r = await this.api.get<CloudflareListResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames`,
+      { params },
+    );
+    return r.data.result ?? [];
   }
 }

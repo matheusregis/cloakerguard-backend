@@ -6,6 +6,7 @@ import { CreateDNSRecordDto } from './dto/create-dns.dto';
 import {
   CloudflareService,
   CloudflareDNSResult,
+  CfCustomHostname,
 } from './cloudflare/cloudflare.service';
 import { UpdateDNSRecordDto } from './dto/update-dns.dto';
 import * as dns from 'node:dns/promises';
@@ -15,7 +16,6 @@ export class DomainService {
   private readonly logger = new Logger(DomainService.name);
 
   private readonly zoneId = process.env.CLOUDFLARE_ZONE_ID!;
-  // host/record de origem do seu edge/reverse-proxy por trás da Cloudflare
   private readonly EDGE_ORIGIN =
     process.env.CLOAKER_EDGE_ORIGIN || 'cloakerguard.com.br';
   private readonly HEALTH_SCHEME = process.env.HEALTHCHECK_SCHEME || 'https';
@@ -31,12 +31,10 @@ export class DomainService {
     if (!this.zoneId) throw new Error('CLOUDFLARE_ZONE_ID não configurada.');
   }
 
-  // normaliza comparações de FQDN
   private n(v?: string) {
     return (v || '').trim().toLowerCase().replace(/\.$/, '');
   }
 
-  // gera o subdomínio interno: <slug>-<userId>.cloakerguard.com.br
   private computeSubdomain(externalFqdn: string, userId: string) {
     const host = this.n(externalFqdn)
       .split('.')[0]
@@ -48,44 +46,51 @@ export class DomainService {
   async createDomain(dto: CreateDNSRecordDto, userId: string) {
     this.ensureZone();
 
-    // fqdn externo (domínio do cliente)
     const externalFqdn = this.n(dto.name);
-    const subdomain = this.computeSubdomain(externalFqdn, userId); // subdomínio interno na nossa zona
-    const subLabel = subdomain.replace('.cloakerguard.com.br', ''); // label dentro da zona
+    const subdomain = this.computeSubdomain(externalFqdn, userId);
+    const subLabel = subdomain.replace('.cloakerguard.com.br', '');
 
-    // 1) Criar CNAME interno apontando para o EDGE
+    // 1) CNAME interno na sua zona
     const response: CloudflareDNSResult =
       await this.cloudflareService.createDNSRecord(
-        subLabel, // name dentro da nossa zona
+        subLabel,
         'CNAME',
         this.EDGE_ORIGIN,
         { zoneId: this.zoneId, proxied: false },
       );
 
-    // 2) Criar registro no banco
-    const domain = await this.domainModel.create({
-      name: externalFqdn, // domínio do cliente
-      type: 'CNAME',
-      content: subdomain, // alvo esperado do CNAME do cliente
-      whiteUrl: dto.whiteUrl,
-      blackUrl: dto.blackUrl,
-      proxied: response?.proxiable ?? false,
-      subdomain, // nosso subdomínio na Cloudflare
-      userId,
-      status: EDomainStatus.PENDING,
-      createdAt: new Date(),
-    });
-
-    // 3) Criar Custom Hostname (SSL automático)
+    // 2) Custom Hostname (TXT)
+    let customHostname: CfCustomHostname | null = null;
     try {
-      await this.cloudflareService.createCustomHostnameHTTP(externalFqdn);
-      this.logger.log(`Custom Hostname criado para ${externalFqdn}`);
+      customHostname = await this.cloudflareService.createCustomHostnameTXT(
+        externalFqdn,
+        { origin: this.EDGE_ORIGIN },
+      );
+      this.logger.log(
+        `Custom Hostname criado para ${externalFqdn}, id=${customHostname.id}`,
+      );
     } catch (err) {
       this.logger.error(
         `Falha ao criar Custom Hostname para ${externalFqdn}`,
-        err?.message || err,
+        (err as any)?.message || err,
       );
     }
+
+    // 3) Persistir
+    const domain = await this.domainModel.create({
+      name: externalFqdn,
+      type: 'CNAME',
+      content: subdomain,
+      whiteUrl: dto.whiteUrl,
+      blackUrl: dto.blackUrl,
+      proxied: response?.proxiable ?? false,
+      subdomain,
+      userId,
+      status: EDomainStatus.PENDING,
+      createdAt: new Date(),
+      customHostnameId: customHostname?.id,
+      validationRecords: customHostname?.ssl?.validation_records ?? [],
+    });
 
     return domain;
   }
@@ -99,37 +104,35 @@ export class DomainService {
 
     this.ensureZone();
 
-    // IMPORTANTE:
-    // Não alteramos o "name" do registro da Cloudflare para o FQDN externo do cliente.
-    // Nosso registro na zona é o "subdomain" (ex: teste-uid.cloakerguard.com.br).
-    const dnsRecord = await this.cloudflareService.getDNSRecordId(
-      domain.subdomain,
-      {
-        zoneId: this.zoneId,
-        type: 'CNAME',
-      },
-    );
+    // ✅ garante string
+    const sub = domain.subdomain;
+    if (!sub) {
+      throw new NotFoundException('Subdomain ausente neste domínio.');
+    }
+
+    const dnsRecord = await this.cloudflareService.getDNSRecordId(sub, {
+      zoneId: this.zoneId,
+      type: 'CNAME',
+    });
     if (!dnsRecord)
       throw new NotFoundException('Registro DNS não encontrado no Cloudflare.');
 
-    // Só atualize "content" se quiser apontar para outra origem interna (EDGE_ORIGIN).
     await this.cloudflareService.updateDNSRecordById(
       this.zoneId,
       dnsRecord.id,
       {
         type: 'CNAME',
         content: dto.content || this.EDGE_ORIGIN,
-        name: domain.subdomain, // garante que permanece o nosso subdomínio
+        name: sub,
         proxied: false,
       },
     );
 
-    // Atualiza dados de exibição/negócio do domínio do cliente
     const updated = await this.domainModel
       .findByIdAndUpdate(
         id,
         {
-          name: dto.name ?? domain.name, // FQDN externo pode mudar
+          name: dto.name ?? domain.name,
           whiteUrl: dto.whiteUrl ?? domain.whiteUrl,
           blackUrl: dto.blackUrl ?? domain.blackUrl,
         },
@@ -147,19 +150,34 @@ export class DomainService {
 
     this.ensureZone();
 
-    const dnsRecord = await this.cloudflareService.getDNSRecordId(
-      domain.subdomain,
-      {
-        zoneId: this.zoneId,
-        type: 'CNAME',
-      },
-    );
+    // ✅ garante string
+    const sub = domain.subdomain;
+    if (!sub) {
+      throw new NotFoundException('Subdomain ausente neste domínio.');
+    }
+
+    const dnsRecord = await this.cloudflareService.getDNSRecordId(sub, {
+      zoneId: this.zoneId,
+      type: 'CNAME',
+    });
     if (!dnsRecord)
       throw new NotFoundException('Registro DNS não encontrado no Cloudflare.');
 
     await this.cloudflareService.deleteDNSRecordById(this.zoneId, dnsRecord.id);
-    await this.domainModel.findByIdAndDelete(id).exec();
 
+    if (domain.customHostnameId) {
+      try {
+        await this.cloudflareService.deleteCustomHostnameById(
+          domain.customHostnameId,
+        );
+      } catch {
+        this.logger.warn(
+          `Falha ao remover Custom Hostname id=${domain.customHostnameId}`,
+        );
+      }
+    }
+
+    await this.domainModel.findByIdAndDelete(id).exec();
     return { deleted: true };
   }
 
@@ -176,10 +194,8 @@ export class DomainService {
   }
 
   async findBySubdomain(subdomain: string) {
-    return this.domainModel.findOne({ subdomain: subdomain });
+    return this.domainModel.findOne({ subdomain });
   }
-
-  // ===== STATUS =====
 
   private async resolveCNAMEs(host: string): Promise<string[]> {
     const fqdn = this.n(host);
@@ -189,15 +205,11 @@ export class DomainService {
         .filter((r: any) => r?.type === 'CNAME' && r?.value)
         .map((r: any) => this.n(r.value));
       if (cnames.length) return cnames;
-    } catch (e) {
-      console.log(e);
-    }
+    } catch {}
     try {
       const cn = await dns.resolveCname(fqdn);
       return (cn || []).map((v) => this.n(v));
-    } catch (e) {
-      console.log(e);
-    }
+    } catch {}
     return [];
   }
 
@@ -215,7 +227,7 @@ export class DomainService {
       });
       clearTimeout(timer);
       if (res.ok) return { ok: true, status: res.status };
-      // fallback GET (alguns provedores bloqueiam HEAD)
+
       const controller2 = new AbortController();
       const timer2 = setTimeout(() => controller2.abort(), 4000);
       const res2 = await fetch(url, {
@@ -234,7 +246,7 @@ export class DomainService {
     const domain = await this.domainModel.findById(domainId).exec();
     if (!domain) throw new NotFoundException('Domain not found');
 
-    const expected = this.n(domain.content); // nosso subdomínio (target esperado)
+    const expected = this.n(domain.content);
     const cnames = await this.resolveCNAMEs(domain.name);
 
     let status = EDomainStatus.PENDING;
@@ -247,13 +259,25 @@ export class DomainService {
       status = EDomainStatus.ERROR;
       reason = `CNAME aponta para "${cnames[0]}", esperado "${expected}".`;
     } else {
-      // CNAME correto -> valida health HTTP
-      const health = await this.httpHealth(domain.name);
-      if (health.ok) {
-        status = EDomainStatus.ACTIVE;
+      if (domain.customHostnameId) {
+        try {
+          const cfHost = await this.cloudflareService.getCustomHostnameById(
+            domain.customHostnameId,
+          );
+          if (cfHost?.ssl?.status === 'active') {
+            status = EDomainStatus.ACTIVE;
+          } else {
+            status = EDomainStatus.PROPAGATING;
+            reason = `SSL status: ${cfHost?.ssl?.status}`;
+          }
+        } catch {
+          status = EDomainStatus.PROPAGATING;
+          reason = 'Aguardando validação SSL.';
+        }
       } else {
-        status = EDomainStatus.PROPAGATING;
-        reason = 'CNAME correto, aguardando propagação/HTTP.';
+        const health = await this.httpHealth(domain.name);
+        status = health.ok ? EDomainStatus.ACTIVE : EDomainStatus.PROPAGATING;
+        if (!health.ok) reason = 'CNAME correto, aguardando propagação/HTTP.';
       }
     }
 
@@ -268,6 +292,7 @@ export class DomainService {
       checkedAt: domain.lastCheckedAt,
     };
   }
+
   async findByHost(host: string) {
     return this.domainModel.findOne({
       $or: [{ subdomain: host }, { name: host }],

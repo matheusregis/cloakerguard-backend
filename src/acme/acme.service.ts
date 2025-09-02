@@ -38,7 +38,7 @@ export class AcmeService {
 
   // === fluxo SaaS ===
   async createCustomerHostname(hostname: string, origin?: string) {
-    const res = await this.cf.createCustomHostnameHTTP(hostname, { origin });
+    const res = await this.cf.createCustomHostnameTXT(hostname, { origin });
     const vr = res?.ssl?.validation_records?.find(
       (v) => v.http_url && v.http_body,
     );
