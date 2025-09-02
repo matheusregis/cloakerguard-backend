@@ -350,4 +350,35 @@ export class CloudflareService {
       perPage: r.data.result_info?.per_page ?? perPage,
     };
   }
+
+  async getCustomHostnameByName(
+    hostname: string,
+    zoneId?: string,
+  ): Promise<CfCustomHostname | null> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+
+    const res = await this.api.get<CloudflareListResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames`,
+      { params: { hostname } },
+    );
+
+    return res.data.result?.[0] ?? null;
+  }
+
+  async updateCustomHostnameSSL(
+    id: string,
+    zoneId?: string,
+  ): Promise<CfCustomHostname> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+
+    const res = await this.api.patch<
+      CloudflareSingleResponse<CfCustomHostname>
+    >(`/zones/${z}/custom_hostnames/${id}`, {
+      ssl: { method: 'http', type: 'dv' },
+    });
+
+    return res.data.result;
+  }
 }

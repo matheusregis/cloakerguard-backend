@@ -48,32 +48,44 @@ export class DomainService {
   async createDomain(dto: CreateDNSRecordDto, userId: string) {
     this.ensureZone();
 
-    // dto.name vem como FQDN externo (ex: teste.promocao.com.br)
+    // fqdn externo (domínio do cliente)
     const externalFqdn = this.n(dto.name);
-    const subdomain = this.computeSubdomain(externalFqdn, userId); // nosso alvo
+    const subdomain = this.computeSubdomain(externalFqdn, userId); // subdomínio interno na nossa zona
     const subLabel = subdomain.replace('.cloakerguard.com.br', ''); // label dentro da zona
 
-    // Criamos na nossa zona um CNAME <subLabel> -> EDGE_ORIGIN
+    // 1) Criar CNAME interno apontando para o EDGE
     const response: CloudflareDNSResult =
       await this.cloudflareService.createDNSRecord(
-        subLabel, // name dentro da zona
+        subLabel, // name dentro da nossa zona
         'CNAME',
         this.EDGE_ORIGIN,
         { zoneId: this.zoneId, proxied: false },
       );
 
+    // 2) Criar registro no banco
     const domain = await this.domainModel.create({
       name: externalFqdn, // domínio do cliente
       type: 'CNAME',
-      content: subdomain, // alvo esperado p/ CNAME do cliente
+      content: subdomain, // alvo esperado do CNAME do cliente
       whiteUrl: dto.whiteUrl,
       blackUrl: dto.blackUrl,
-      proxied: response?.result?.proxied ?? false,
+      proxied: response?.proxiable ?? false,
       subdomain, // nosso subdomínio na Cloudflare
       userId,
       status: EDomainStatus.PENDING,
       createdAt: new Date(),
     });
+
+    // 3) Criar Custom Hostname (SSL automático)
+    try {
+      await this.cloudflareService.createCustomHostnameHTTP(externalFqdn);
+      this.logger.log(`Custom Hostname criado para ${externalFqdn}`);
+    } catch (err) {
+      this.logger.error(
+        `Falha ao criar Custom Hostname para ${externalFqdn}`,
+        err?.message || err,
+      );
+    }
 
     return domain;
   }
