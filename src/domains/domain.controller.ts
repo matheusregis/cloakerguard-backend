@@ -101,4 +101,11 @@ export class DomainController {
   async getStatus(@Param('domainId') domainId: string) {
     return this.domainService.checkStatus(domainId);
   }
+
+  @Get('acme-http')
+  async acmeHttp(@Query('host') host: string) {
+    const body = await this.domainService.getAcmeHttpBody(host);
+    if (!body) throw new NotFoundException('No token');
+    return { body };
+  }
 }

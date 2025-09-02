@@ -309,4 +309,10 @@ export class DomainService {
       checkedAt: (domain as any).lastCheckedAt,
     };
   }
+
+  async getAcmeHttpBody(hostname: string): Promise<string | null> {
+    const ch = await this.cloudflare.getCustomHostnameByName(hostname);
+    const rec = ch?.ssl?.validation_records?.find((r) => r.http_body);
+    return rec?.http_body || null;
+  }
 }

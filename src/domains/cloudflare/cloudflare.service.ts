@@ -347,4 +347,19 @@ export class CloudflareService {
       perPage: r.data.result_info?.per_page ?? perPage,
     };
   }
+
+  async getCustomHostnameByName(
+    hostname: string,
+    zoneId?: string,
+  ): Promise<CfCustomHostname | null> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+
+    const r = await this.api.get<CloudflareListResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames`,
+      { params: { hostname, per_page: 1 } },
+    );
+
+    return r.data.result?.[0] ?? null;
+  }
 }
