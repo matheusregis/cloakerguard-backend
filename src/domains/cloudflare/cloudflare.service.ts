@@ -71,13 +71,13 @@ export class CloudflareService {
   private readonly logger = new Logger(CloudflareService.name);
   private readonly api: AxiosInstance;
 
-  /** Zona SaaS (ex.: cloakerguard.com.br) onde os Custom Hostnames são criados */
+  /** SUA zona (onde os custom hostnames são criados). */
   private readonly saasZoneId: string | undefined =
     process.env.CLOUDFLARE_ZONE_ID || process.env.CLOUDFLARE_SAAS_ZONE_ID;
   private readonly saasZoneName: string | undefined =
     process.env.CLOUDFLARE_ZONE_NAME;
 
-  /** Cache opcional de zoneId por apex */
+  /** Cache simples para zoneId por apex. */
   private readonly zoneCache = new Map<string, string>();
 
   constructor() {
@@ -98,8 +98,7 @@ export class CloudflareService {
     }
   }
 
-  // -------------------- utils/zones --------------------
-
+  // ---------- utils/zones ----------
   private getApexFromFqdn(fqdn: string): string | null {
     return (pslGet as (d: string) => string | null)(fqdn) ?? null;
   }
@@ -111,7 +110,9 @@ export class CloudflareService {
   async listZones(): Promise<CloudflareZone[]> {
     const res = await this.api.get<CloudflareListResponse<CloudflareZone>>(
       '/zones',
-      { params: { per_page: 50 } },
+      {
+        params: { per_page: 50 },
+      },
     );
     return res.data.result ?? [];
   }
@@ -122,7 +123,9 @@ export class CloudflareService {
 
     const res = await this.api.get<CloudflareListResponse<CloudflareZone>>(
       '/zones',
-      { params: { name: apex, status: 'active', per_page: 1 } },
+      {
+        params: { name: apex, status: 'active', per_page: 1 },
+      },
     );
 
     const zone = res.data.result?.[0] ?? null;
@@ -131,7 +134,7 @@ export class CloudflareService {
     return zoneId;
   }
 
-  /** Resolve zoneId para operações de DNS dentro da ZONA dona do FQDN. */
+  /** Resolve o zoneId (para operações DNS) a partir do FQDN. */
   private async resolveZoneIdForName(
     fqdn: string,
     opts?: { zoneId?: string },
@@ -142,8 +145,7 @@ export class CloudflareService {
     return this.getZoneIdByApex(apex);
   }
 
-  // -------------------- DNS Records --------------------
-
+  // ---------- DNS ----------
   async createDNSRecord(
     name: string,
     type: DnsType,
@@ -277,9 +279,7 @@ export class CloudflareService {
     await this.deleteDNSRecordById(found.zoneId, found.id);
   }
 
-  // -------------------- Custom Hostnames (SaaS) --------------------
-
-  /** Cria Custom Hostname com validação HTTP (se você realmente precisar) */
+  // ---------- Custom Hostnames (HTTP-DV) ----------
   async createCustomHostnameHTTP(
     hostname: string,
     opts?: { origin?: string; zoneId?: string },
@@ -289,32 +289,6 @@ export class CloudflareService {
       throw new Error('CLOUDFLARE_ZONE_ID (zona SaaS) não configurado');
 
     const body: any = { hostname, ssl: { method: 'http', type: 'dv' } };
-    if (opts?.origin) body.custom_origin_server = opts.origin;
-
-    const res = await this.api.post<CloudflareSingleResponse<CfCustomHostname>>(
-      `/zones/${zoneId}/custom_hostnames`,
-      body,
-    );
-    return res.data.result;
-  }
-
-  /** Cria Custom Hostname com validação TXT (recomendado) */
-  async createCustomHostnameTXT(
-    hostname: string,
-    opts?: { origin?: string; zoneId?: string },
-  ): Promise<CfCustomHostname> {
-    const zoneId = opts?.zoneId || this.saasZoneId;
-    if (!zoneId)
-      throw new Error('CLOUDFLARE_ZONE_ID (zona SaaS) não configurado');
-
-    const body: any = {
-      hostname,
-      ssl: {
-        method: 'txt',
-        type: 'dv',
-      },
-    };
-
     if (opts?.origin) body.custom_origin_server = opts.origin;
 
     const res = await this.api.post<CloudflareSingleResponse<CfCustomHostname>>(
@@ -336,21 +310,6 @@ export class CloudflareService {
     return r.data.result;
   }
 
-  async getCustomHostnameByName(
-    hostname: string,
-    zoneId?: string,
-  ): Promise<CfCustomHostname | null> {
-    const z = zoneId || this.saasZoneId;
-    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
-
-    const res = await this.api.get<CloudflareListResponse<CfCustomHostname>>(
-      `/zones/${z}/custom_hostnames`,
-      { params: { hostname } },
-    );
-
-    return res.data.result?.[0] ?? null;
-  }
-
   async deleteCustomHostnameById(id: string, zoneId?: string): Promise<void> {
     const z = zoneId || this.saasZoneId;
     if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
@@ -359,31 +318,17 @@ export class CloudflareService {
     );
   }
 
-  /** Força reemissão/validação do SSL (padrão = txt; pode escolher http) */
-  async updateCustomHostnameSSL(
-    id: string,
-    zoneId?: string,
-    method: 'txt' | 'http' = 'txt',
-  ): Promise<CfCustomHostname> {
-    const z = zoneId || this.saasZoneId;
-    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
-
-    const res = await this.api.patch<
-      CloudflareSingleResponse<CfCustomHostname>
-    >(`/zones/${z}/custom_hostnames/${id}`, {
-      ssl: { method, type: 'dv' },
-    });
-
-    return res.data.result;
-  }
-
-  /** Lista simples (array) */
   async listCustomHostnames(
     page = 1,
     perPage = 50,
     zoneId?: string,
     search?: { hostname?: string; ssl_status?: string },
-  ): Promise<CfCustomHostname[]> {
+  ): Promise<{
+    items: CfCustomHostname[];
+    total?: number;
+    page: number;
+    perPage: number;
+  }> {
     const z = zoneId || this.saasZoneId;
     if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
 
@@ -395,6 +340,11 @@ export class CloudflareService {
       `/zones/${z}/custom_hostnames`,
       { params },
     );
-    return r.data.result ?? [];
+    return {
+      items: r.data.result ?? [],
+      total: r.data.result_info?.total_count,
+      page: r.data.result_info?.page ?? page,
+      perPage: r.data.result_info?.per_page ?? perPage,
+    };
   }
 }

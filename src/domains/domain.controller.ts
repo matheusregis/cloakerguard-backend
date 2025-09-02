@@ -63,7 +63,7 @@ export class DomainController {
   async createDomain(
     @Param('clientId') clientId: string,
     @Body() body: CreateDNSRecordDto,
-  ): Promise<Domain> {
+  ): Promise<Domain | null> {
     return this.domainService.createDomain(body, clientId);
   }
 
