@@ -55,7 +55,7 @@ export class CloakerMiddleware implements NestMiddleware {
       // regra padrão; pode vir da sua DB via domain.rules.uaBlock
       const isBot =
         (domain?.rules?.uaBlock &&
-          new RegExp((domain as any).rules.uaBlock, 'i').test(ua)) ||
+          new RegExp(domain.rules.uaBlock, 'i').test(ua)) ||
         /bot|crawl|slurp|spider|mediapartners|facebookexternalhit|headlesschrome|curl/i.test(
           ua,
         );

@@ -177,11 +177,15 @@ export class DomainService {
         .filter((r: any) => r?.type === 'CNAME' && r?.value)
         .map((r: any) => this.n(r.value));
       if (cnames.length) return cnames;
-    } catch {}
+    } catch (e) {
+      console.log(e);
+    }
     try {
       const cn = await dns.resolveCname(fqdn);
       return (cn || []).map((v) => this.n(v));
-    } catch {}
+    } catch (e) {
+      console.log(e);
+    }
     return [];
   }
 

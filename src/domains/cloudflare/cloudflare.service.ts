@@ -1,3 +1,4 @@
+// src/cloudflare/cloudflare.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { get as pslGet } from 'psl';
@@ -43,17 +44,45 @@ export interface CloudflareSingleResponse<T> {
   messages: string[];
 }
 
+/** Custom Hostnames (SaaS) */
+export type CfValidationRecord = {
+  http_url?: string;
+  http_body?: string;
+  txt_name?: string;
+  txt_value?: string;
+};
+
+export type CfCustomHostname = {
+  id: string;
+  hostname: string;
+  ssl?: {
+    status?: string; // pending_validation | pending_issuance | active | ...
+    validation_records?: CfValidationRecord[];
+    method?: 'http' | 'txt' | 'email';
+    type?: 'dv';
+  };
+  status?: string;
+  created_at?: string;
+  [key: string]: any;
+};
+
 @Injectable()
 export class CloudflareService {
   private readonly logger = new Logger(CloudflareService.name);
   private readonly api: AxiosInstance;
-  private readonly zoneCache = new Map<string, string>(); // apex -> zoneId
+
+  /** Zona da SUA conta (ex.: cloakerguard.com.br). É aqui que os Custom Hostnames são criados. */
+  private readonly saasZoneId: string | undefined =
+    process.env.CLOUDFLARE_ZONE_ID || process.env.CLOUDFLARE_SAAS_ZONE_ID;
+  private readonly saasZoneName: string | undefined =
+    process.env.CLOUDFLARE_ZONE_NAME;
+
+  /** Cache simples para zoneId por apex (para operações de DNS comuns) */
+  private readonly zoneCache = new Map<string, string>();
 
   constructor() {
     const token = process.env.CLOUDFLARE_API_TOKEN;
-    if (!token) {
-      this.logger.warn('CLOUDFLARE_API_TOKEN não definido.');
-    }
+    if (!token) this.logger.warn('CLOUDFLARE_API_TOKEN não definido.');
 
     this.api = axios.create({
       baseURL: 'https://api.cloudflare.com/client/v4',
@@ -64,15 +93,15 @@ export class CloudflareService {
       timeout: 15000,
     });
 
-    const defaultZoneId = process.env.CLOUDFLARE_ZONE_ID;
-    const defaultApex = process.env.CLOUDFLARE_ZONE_NAME; // ex: "cloakerguard.com.br"
-    if (defaultZoneId && defaultApex)
-      this.zoneCache.set(defaultApex, defaultZoneId);
+    if (this.saasZoneId && this.saasZoneName) {
+      this.zoneCache.set(this.saasZoneName, this.saasZoneId);
+    }
   }
 
+  // -------------------- utils/zones --------------------
+
   private getApexFromFqdn(fqdn: string): string | null {
-    const apex = (pslGet as (domain: string) => string | null)(fqdn);
-    return apex ?? null;
+    return (pslGet as (d: string) => string | null)(fqdn) ?? null;
   }
 
   private ensureExact<T>(arr: T[], predicate: (t: T) => boolean): T | null {
@@ -82,49 +111,38 @@ export class CloudflareService {
   async listZones(): Promise<CloudflareZone[]> {
     const res = await this.api.get<CloudflareListResponse<CloudflareZone>>(
       '/zones',
-      {
-        params: { per_page: 50 },
-      },
+      { params: { per_page: 50 } },
     );
     return res.data.result ?? [];
   }
 
   async getZoneIdByApex(apex: string): Promise<string | null> {
     if (!apex) return null;
-
     if (this.zoneCache.has(apex)) return this.zoneCache.get(apex)!;
 
     const res = await this.api.get<CloudflareListResponse<CloudflareZone>>(
       '/zones',
-      {
-        params: { name: apex, status: 'active', per_page: 1 },
-      },
+      { params: { name: apex, status: 'active', per_page: 1 } },
     );
 
     const zone = res.data.result?.[0] ?? null;
     const zoneId = zone?.id ?? null;
-
     if (zoneId) this.zoneCache.set(apex, zoneId);
     return zoneId;
   }
 
-  /**
-   * Resolve zoneId a partir de um FQDN (ex.: sub.apex.com.br -> apex.com.br -> zoneId)
-   * Opcionalmente aceita um zoneId “forçado” via opts.
-   */
+  /** Resolve zoneId para operações de DNS dentro da ZONA DONA do FQDN. */
   private async resolveZoneIdForName(
     fqdn: string,
     opts?: { zoneId?: string },
   ): Promise<string | null> {
     if (opts?.zoneId) return opts.zoneId;
-
     const apex = this.getApexFromFqdn(fqdn);
     if (!apex) return null;
-
     return this.getZoneIdByApex(apex);
   }
 
-  // ---- DNS Records ----
+  // -------------------- DNS Records --------------------
 
   async createDNSRecord(
     name: string,
@@ -133,9 +151,12 @@ export class CloudflareService {
     opts?: { zoneId?: string; proxied?: boolean; ttl?: number },
   ): Promise<CloudflareDNSResult> {
     try {
+      const zoneId = await this.resolveZoneIdForName(name, opts);
+      if (!zoneId) throw new Error('zoneId não resolvido para criar DNS');
+
       const res = await this.api.post<
         CloudflareSingleResponse<CloudflareDNSResult>
-      >(`/zones/${opts?.zoneId}/dns_records`, {
+      >(`/zones/${zoneId}/dns_records`, {
         type,
         name,
         content,
@@ -145,16 +166,13 @@ export class CloudflareService {
       return res.data.result;
     } catch (err: any) {
       this.logger.error(
-        `Erro ao criar DNS na Cloudflare (${name}):`,
+        `Erro ao criar DNS (${name}):`,
         err?.response?.data ? JSON.stringify(err.response.data) : err?.message,
       );
       throw err;
     }
   }
 
-  /**
-   * Retorna o ID do record exato (name + opcional type) dentro de uma zona.
-   */
   async getDNSRecordId(
     name: string,
     opts: { zoneId?: string; type?: DnsType } = {},
@@ -174,23 +192,21 @@ export class CloudflareService {
         },
       });
 
-      const record =
-        this.ensureExact(res.data.result ?? [], (r) => r.name === name) ?? null;
-
+      const record = this.ensureExact(
+        res.data.result ?? [],
+        (r) => r.name === name,
+      );
       if (!record) return null;
       return { id: record.id, zoneId };
     } catch (err: any) {
       this.logger.error(
-        `Erro ao buscar DNS ID na Cloudflare (${name}):`,
+        `Erro ao buscar DNS ID (${name}):`,
         err?.response?.data ? JSON.stringify(err.response.data) : err?.message,
       );
       return null;
     }
   }
 
-  /**
-   * Atualiza um record pelo ID (exige zoneId).
-   */
   async updateDNSRecordById(
     zoneId: string,
     id: string,
@@ -215,16 +231,13 @@ export class CloudflareService {
       return res.data.result;
     } catch (err: any) {
       this.logger.error(
-        `Erro ao atualizar DNS na Cloudflare (id=${id}):`,
+        `Erro ao atualizar DNS (id=${id}):`,
         err?.response?.data ? JSON.stringify(err.response.data) : err?.message,
       );
       throw err;
     }
   }
 
-  /**
-   * Deleta um record pelo ID (exige zoneId).
-   */
   async deleteDNSRecordById(zoneId: string, id: string): Promise<void> {
     try {
       await this.api.delete<CloudflareSingleResponse<CloudflareDNSResult>>(
@@ -232,16 +245,13 @@ export class CloudflareService {
       );
     } catch (err: any) {
       this.logger.error(
-        `Erro ao deletar DNS na Cloudflare (id=${id}):`,
+        `Erro ao deletar DNS (id=${id}):`,
         err?.response?.data ? JSON.stringify(err.response.data) : err?.message,
       );
       throw err;
     }
   }
 
-  /**
-   * Atualiza um record pelo FQDN (resolve zoneId e recordId).
-   */
   async updateDNSByName(
     name: string,
     data: { type: DnsType; content: string; proxied?: boolean; ttl?: number },
@@ -251,16 +261,10 @@ export class CloudflareService {
       zoneId: opts?.zoneId,
       type: data.type,
     });
-    if (!found)
-      throw new Error(
-        'Registro DNS não encontrado na Cloudflare para este nome.',
-      );
+    if (!found) throw new Error('Registro DNS não encontrado para este nome.');
     return this.updateDNSRecordById(found.zoneId, found.id, { name, ...data });
   }
 
-  /**
-   * Deleta um record pelo FQDN.
-   */
   async deleteDNSByName(
     name: string,
     opts?: { zoneId?: string; type?: DnsType },
@@ -271,5 +275,79 @@ export class CloudflareService {
     });
     if (!found) return;
     await this.deleteDNSRecordById(found.zoneId, found.id);
+  }
+
+  // -------------------- Custom Hostnames (SaaS) --------------------
+
+  /**
+   * Cria um Custom Hostname na SUA zona (saasZoneId) com validação HTTP (DV).
+   * Use opts.origin para forçar um origin específico; se omitido, CF usará o Fallback Origin.
+   */
+  async createCustomHostnameHTTP(
+    hostname: string,
+    opts?: { origin?: string; zoneId?: string },
+  ): Promise<CfCustomHostname> {
+    const zoneId = opts?.zoneId || this.saasZoneId;
+    if (!zoneId)
+      throw new Error('CLOUDFLARE_ZONE_ID (zona SaaS) não configurado');
+
+    const body: any = { hostname, ssl: { method: 'http', type: 'dv' } };
+    if (opts?.origin) body.custom_origin_server = opts.origin;
+
+    const res = await this.api.post<CloudflareSingleResponse<CfCustomHostname>>(
+      `/zones/${zoneId}/custom_hostnames`,
+      body,
+    );
+    return res.data.result;
+  }
+
+  async getCustomHostnameById(
+    id: string,
+    zoneId?: string,
+  ): Promise<CfCustomHostname> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+    const r = await this.api.get<CloudflareSingleResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames/${id}`,
+    );
+    return r.data.result;
+  }
+
+  async deleteCustomHostnameById(id: string, zoneId?: string): Promise<void> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+    await this.api.delete<CloudflareSingleResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames/${id}`,
+    );
+  }
+
+  async listCustomHostnames(
+    page = 1,
+    perPage = 50,
+    zoneId?: string,
+    search?: { hostname?: string; ssl_status?: string },
+  ): Promise<{
+    items: CfCustomHostname[];
+    total?: number;
+    page: number;
+    perPage: number;
+  }> {
+    const z = zoneId || this.saasZoneId;
+    if (!z) throw new Error('CLOUDFLARE_ZONE_ID não configurado');
+
+    const params: Record<string, any> = { page, per_page: perPage };
+    if (search?.hostname) params.hostname = search.hostname;
+    if (search?.ssl_status) params['ssl'] = search.ssl_status;
+
+    const r = await this.api.get<CloudflareListResponse<CfCustomHostname>>(
+      `/zones/${z}/custom_hostnames`,
+      { params },
+    );
+    return {
+      items: r.data.result ?? [],
+      total: r.data.result_info?.total_count,
+      page: r.data.result_info?.page ?? page,
+      perPage: r.data.result_info?.per_page ?? perPage,
+    };
   }
 }
