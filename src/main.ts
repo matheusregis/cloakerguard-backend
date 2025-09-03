@@ -19,6 +19,17 @@ async function bootstrap() {
     credentials: true,
   });
 
+  app.use((req, _res, next) => {
+    console.log(
+      '[REQ]',
+      req.method,
+      req.originalUrl,
+      'Host:',
+      req.headers.host,
+    );
+    next();
+  });
+
   await app.listen(process.env.PORT || 3000);
   logger.log(`🚀 Aplicação rodando na porta ${process.env.PORT || 3000}`);
 }

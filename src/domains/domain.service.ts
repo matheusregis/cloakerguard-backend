@@ -186,13 +186,31 @@ export class DomainService {
   }
 
   async findBySubdomain(subdomain: string) {
-    return this.domainModel.findOne({ subdomain });
+    console.log(
+      '[DomainService.findBySubdomain] Procurando por subdomain=',
+      subdomain,
+    );
+    const domain = await this.domainModel.findOne({ subdomain });
+    console.log(
+      '[DomainService.findBySubdomain] Resultado:',
+      domain ? domain._id : 'NOT FOUND',
+    );
+    return domain;
   }
 
   async findByHost(host: string) {
-    return this.domainModel.findOne({
+    console.log(
+      '[DomainService.findByHost] Procurando por host/subdomain=',
+      host,
+    );
+    const domain = await this.domainModel.findOne({
       $or: [{ subdomain: host }, { name: host }],
     });
+    console.log(
+      '[DomainService.findByHost] Resultado:',
+      domain ? domain._id : 'NOT FOUND',
+    );
+    return domain;
   }
 
   async countActiveByUser(userId: string) {
