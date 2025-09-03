@@ -21,6 +21,12 @@ function normalizeHost(raw = ''): string {
   return h;
 }
 
+function ensureHttpUrl(raw?: string): string | null {
+  if (!raw) return null;
+  const hasScheme = /^https?:\/\//i.test(raw);
+  return hasScheme ? raw : `https://${raw}`;
+}
+
 @Controller('domains')
 export class DomainController {
   constructor(private readonly domainService: DomainService) {}
@@ -30,7 +36,6 @@ export class DomainController {
     const h = normalizeHost(host || '');
     if (!h) throw new NotFoundException('host query is required');
 
-    // tenta por host/name/subdomain (ajuste conforme seu DomainService)
     const domain =
       (await (this.domainService as any).findByHost?.(h)) ||
       (await (this.domainService as any).findByName?.(h)) ||
@@ -39,7 +44,6 @@ export class DomainController {
 
     if (!domain) throw new NotFoundException('Domain not found');
 
-    // mapeia campos possíveis (ajuste se seus nomes diferirem)
     const white =
       (domain.whiteOrigin as string) ||
       (domain.whiteUrl as string) ||
@@ -53,8 +57,8 @@ export class DomainController {
 
     return {
       host: domain.host || domain.name || h,
-      whiteOrigin: white || null,
-      blackOrigin: black || null,
+      whiteOrigin: ensureHttpUrl(white),
+      blackOrigin: ensureHttpUrl(black),
       rules: domain.rules || {},
     };
   }
