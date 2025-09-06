@@ -34,6 +34,15 @@ export class CloakerMiddleware implements NestMiddleware {
         '';
       const host = normalizeHost(hostHdr);
 
+      // 👇 Se for host do painel interno, ignora e segue pro controller normal
+      if (
+        host.endsWith('cloakerguard.com.br') ||
+        host.endsWith('www.cloakerguard.com.br') ||
+        host.startsWith('api.cloakerguard.com.br')
+      ) {
+        return next();
+      }
+
       // tenta name/host/subdomain
       const domain =
         (await (this.domainService as any).findByHost?.(host)) ||
@@ -52,7 +61,7 @@ export class CloakerMiddleware implements NestMiddleware {
         (req.headers['referrer'] as string) ||
         '';
 
-      // regra padrão; pode vir da sua DB via domain.rules.uaBlock
+      // regra padrão (UA block)
       const isBot =
         (domain?.rules?.uaBlock &&
           new RegExp(domain.rules.uaBlock, 'i').test(ua)) ||
