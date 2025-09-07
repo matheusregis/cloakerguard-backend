@@ -34,7 +34,7 @@ export class CloakerMiddleware implements NestMiddleware {
         '';
       const host = normalizeHost(hostHdr);
 
-      // 👇 Se for host do painel interno, ignora e segue pro controller normal
+      // Se for host interno, não intercepta
       if (
         host.endsWith('cloakerguard.com.br') ||
         host.endsWith('www.cloakerguard.com.br') ||
@@ -43,15 +43,19 @@ export class CloakerMiddleware implements NestMiddleware {
         return next();
       }
 
-      // tenta name/host/subdomain
+      // Procura domínio na base
       const domain =
         (await (this.domainService as any).findByHost?.(host)) ||
         (await (this.domainService as any).findByName?.(host)) ||
         (await this.domainService.findBySubdomain(host)) ||
         null;
 
-      // não é domínio gerenciado? segue
-      if (!domain) return next();
+      if (!domain) {
+        return res.status(404).json({
+          error: 'Domain not managed',
+          host,
+        });
+      }
 
       const xfwd = (req.headers['x-forwarded-for'] as string) || '';
       const ip = (xfwd.split(',')[0] || req.socket.remoteAddress || '').trim();
@@ -61,7 +65,7 @@ export class CloakerMiddleware implements NestMiddleware {
         (req.headers['referrer'] as string) ||
         '';
 
-      // regra padrão (UA block)
+      // Regra de bloqueio de user-agent
       const isBot =
         (domain?.rules?.uaBlock &&
           new RegExp(domain.rules.uaBlock, 'i').test(ua)) ||
@@ -81,17 +85,33 @@ export class CloakerMiddleware implements NestMiddleware {
 
       const targetRaw = isBot ? domain.whiteUrl : domain.blackUrl;
       const redirectTo = safeUrl(targetRaw);
-      if (!redirectTo) return next();
 
-      // evita loop: destino == host atual
-      try {
-        const destHost = normalizeHost(new URL(redirectTo).host);
-        if (destHost === host) return next();
-      } catch {
-        return next();
+      if (!redirectTo) {
+        return res.status(404).json({
+          error: 'No redirect URL configured',
+          host,
+          decision,
+        });
       }
 
-      // logs/analytics assíncronos
+      // Previne loop (se redirect for pro mesmo host)
+      try {
+        const destHost = normalizeHost(new URL(redirectTo).host);
+        if (destHost === host) {
+          return res.status(409).json({
+            error: 'Redirect loop detected',
+            host,
+            redirectTo,
+          });
+        }
+      } catch {
+        return res.status(400).json({
+          error: 'Invalid redirect URL',
+          redirectTo,
+        });
+      }
+
+      // Logs e analytics (assíncronos)
       void this.logService.create({
         subdomain: host,
         ip,
@@ -112,10 +132,14 @@ export class CloakerMiddleware implements NestMiddleware {
         referer,
       });
 
-      return res.redirect(redirectTo);
+      // Redireciona o usuário
+      return res.redirect(302, redirectTo);
     } catch (err) {
       console.error('Erro no CloakerMiddleware:', (err as Error).message);
-      return next();
+      return res.status(500).json({
+        error: 'Internal cloaker error',
+        message: (err as Error).message,
+      });
     }
   }
 }
