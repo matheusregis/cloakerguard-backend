@@ -35,13 +35,12 @@ export class CloakerMiddleware implements NestMiddleware {
       const host = normalizeHost(hostHdr);
 
       // Se for host interno, não intercepta
-      if (
-        host.endsWith('cloakerguard.com.br') ||
-        host.endsWith('www.cloakerguard.com.br') ||
-        host.startsWith('api.cloakerguard.com.br')
-      ) {
-        return next();
-      }
+      const isInternal =
+        host === 'cloakerguard.com.br' ||
+        host === 'www.cloakerguard.com.br' ||
+        host === 'api.cloakerguard.com.br';
+
+      if (isInternal) return next();
 
       // Procura domínio na base
       const domain =
