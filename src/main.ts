@@ -28,8 +28,8 @@ async function bootstrap() {
   const domainService = app.get(DomainService);
   const logService = app.get(CloakerLogService);
   const analytics = app.get(AnalyticsService);
-  // eslint-disable-next-line @typescript-eslint/unbound-method
-  app.use(new CloakerMiddleware(domainService, logService, analytics).use);
+  const cloaker = new CloakerMiddleware(domainService, logService, analytics);
+  app.use(cloaker.use.bind(cloaker));
 
   app.use((req, _res, next) => {
     console.log(
