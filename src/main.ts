@@ -30,6 +30,16 @@ async function bootstrap() {
   const analytics = app.get(AnalyticsService);
   const cloaker = new CloakerMiddleware(domainService, logService, analytics);
   app.use(cloaker.use.bind(cloaker));
+  app.use((req, _res, next) => {
+    console.log(
+      '[HDR]',
+      'XFH=',
+      req.headers['x-forwarded-host'],
+      'Host=',
+      req.headers.host,
+    );
+    next();
+  });
 
   app.use((req, _res, next) => {
     console.log(
