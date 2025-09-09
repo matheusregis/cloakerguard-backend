@@ -16,8 +16,8 @@ import { Domain, DomainDocument } from './schemas/domain.schema';
 
 function normalizeHost(raw = ''): string {
   let h = raw.split(',')[0].trim().toLowerCase();
-  h = h.replace(/:\d+$/, ''); // remove porta
-  h = h.replace(/^\[([^[\]]+)\](:\d+)?$/, '[$1]'); // normaliza IPv6
+  h = h.replace(/:\d+$/, '');
+  h = h.replace(/^\[([^[\]]+)\](:\d+)?$/, '[$1]');
   return h;
 }
 
@@ -31,7 +31,10 @@ function ensureHttpUrl(raw?: string): string | null {
 export class DomainController {
   constructor(private readonly domainService: DomainService) {}
 
-  // 🔍 Resolve domínio pelo host (usado pelo edge)
+  /**
+   * Resolve qual domínio deve ser usado pelo Edge.
+   * Recebe ?host=promo.matheusregis.com.br
+   */
   @Get('resolve')
   async resolve(@Query('host') host?: string) {
     const h = normalizeHost(host || '');
@@ -42,11 +45,8 @@ export class DomainController {
       throw new NotFoundException('host query is required');
     }
 
-    const domain =
-      (await (this.domainService as any).findByHost?.(h)) ||
-      (await (this.domainService as any).findByName?.(h)) ||
-      (await this.domainService.findBySubdomain(h)) ||
-      null;
+    // 🔑 Busca correta: usa findByHost (que cobre name + subdomain)
+    const domain = await this.domainService.findByHost(h);
 
     if (!domain) {
       console.warn('[DOMAINS/RESOLVE] Não encontrou domain para host:', h);
@@ -62,14 +62,13 @@ export class DomainController {
     });
 
     return {
-      host: domain.host || domain.name || h,
-      whiteOrigin: domain.whiteOrigin || domain.whiteUrl || null,
-      blackOrigin: domain.blackOrigin || domain.blackUrl || null,
-      rules: domain.rules || {},
+      host: domain.name || h,
+      whiteOrigin: ensureHttpUrl((domain as any).whiteUrl) || null,
+      blackOrigin: ensureHttpUrl((domain as any).blackUrl) || null,
+      rules: (domain as any).rules || {},
     };
   }
 
-  // ➕ Criar domínio
   @Post(':clientId')
   async createDomain(
     @Param('clientId') clientId: string,
@@ -78,7 +77,6 @@ export class DomainController {
     return this.domainService.createDomain(body, clientId);
   }
 
-  // 📋 Listar domínios de um cliente
   @Get('client/:clientId')
   async getClientDomains(
     @Param('clientId') clientId: string,
@@ -86,7 +84,6 @@ export class DomainController {
     return this.domainService.findAllByUser(clientId);
   }
 
-  // 🔎 Buscar por subdomínio interno
   @Get('subdomain/:subdomain')
   async getBySubdomain(
     @Param('subdomain') subdomain: string,
@@ -94,7 +91,6 @@ export class DomainController {
     return this.domainService.findBySubdomain(subdomain);
   }
 
-  // ✏️ Atualizar domínio
   @Put(':domainId')
   updateDomain(
     @Param('domainId') domainId: string,
@@ -103,7 +99,6 @@ export class DomainController {
     return this.domainService.updateDomain(domainId, body);
   }
 
-  // ❌ Excluir domínio
   @Delete(':domainId')
   deleteDomain(
     @Param('domainId') domainId: string,
@@ -111,7 +106,6 @@ export class DomainController {
     return this.domainService.deleteDomain(domainId);
   }
 
-  // ✅ Verificar status (Cloudflare + DNS público + HTTP health)
   @Get(':domainId/status')
   async getStatus(@Param('domainId') domainId: string) {
     return this.domainService.checkStatus(domainId);
