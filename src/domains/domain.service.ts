@@ -1,4 +1,3 @@
-// src/domains/domain.service.ts
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -8,7 +7,6 @@ import { UpdateDNSRecordDto } from './dto/update-dns.dto';
 import {
   CloudflareService,
   CloudflareDNSResult,
-  CfCustomHostname,
 } from '../domains/cloudflare/cloudflare.service';
 import * as dns from 'node:dns/promises';
 
@@ -57,7 +55,7 @@ export class DomainService {
 
     // 1) CNAME interno -> EDGE
     const dnsRes: CloudflareDNSResult = await this.cloudflare.createDNSRecord(
-      subLabel, // dentro da SUA zona
+      subLabel,
       'CNAME',
       this.EDGE_ORIGIN,
       { zoneId: this.zoneId, proxied: false },
@@ -67,7 +65,7 @@ export class DomainService {
     const domain = await this.domainModel.create({
       name: externalFqdn,
       type: 'CNAME',
-      content: subdomain, // alvo que o cliente vai apontar
+      content: this.EDGE_ORIGIN,
       whiteUrl: dto.whiteUrl,
       blackUrl: dto.blackUrl,
       proxied: dnsRes?.proxiable ?? false,
@@ -76,23 +74,6 @@ export class DomainService {
       status: EDomainStatus.PENDING,
       createdAt: new Date(),
     });
-
-    // 3) Custom Hostname (HTTP-DV) -> guarda tokens
-    try {
-      const ch: CfCustomHostname =
-        await this.cloudflare.createCustomHostnameHTTP(externalFqdn, {
-          origin: this.EDGE_ORIGIN,
-        });
-
-      await this.domainModel.findByIdAndUpdate(domain._id, {
-        customHostnameId: ch.id,
-        validationRecords: ch.ssl?.validation_records ?? [],
-      });
-    } catch (err: any) {
-      this.logger.error(
-        `Falha ao criar Custom Hostname para ${externalFqdn}: ${err?.message || err}`,
-      );
-    }
 
     return this.domainModel.findById(domain._id);
   }
@@ -105,7 +86,6 @@ export class DomainService {
     if (!domain) throw new NotFoundException('Domain not found');
     this.ensureZone();
 
-    // mantém nosso subdomínio; atualiza destino interno se precisar
     const rec = await this.cloudflare.getDNSRecordId(
       (domain as any).subdomain,
       {
@@ -118,7 +98,7 @@ export class DomainService {
 
     await this.cloudflare.updateDNSRecordById(this.zoneId, rec.id, {
       type: 'CNAME',
-      content: dto.content || this.EDGE_ORIGIN,
+      content: this.EDGE_ORIGIN,
       name: (domain as any).subdomain,
       proxied: false,
     });
@@ -144,20 +124,6 @@ export class DomainService {
     if (!domain) throw new NotFoundException('Domain not found');
     this.ensureZone();
 
-    // remove Custom Hostname se existir
-    if ((domain as any).customHostnameId) {
-      try {
-        await this.cloudflare.deleteCustomHostnameById(
-          (domain as any).customHostnameId,
-        );
-      } catch (e) {
-        this.logger.warn(
-          `Falha ao remover Custom Hostname id=${(domain as any).customHostnameId}: ${String(e)}`,
-        );
-      }
-    }
-
-    // remove CNAME interno
     const rec = await this.cloudflare.getDNSRecordId(
       (domain as any).subdomain,
       {
@@ -171,7 +137,7 @@ export class DomainService {
     return { deleted: true };
   }
 
-  // -------- Queries usadas pelos controllers --------
+  // -------- Queries --------
 
   async findAllByUser(userId: string) {
     return this.domainModel.find({ userId });
@@ -186,31 +152,17 @@ export class DomainService {
   }
 
   async findBySubdomain(subdomain: string) {
-    console.log(
-      '[DomainService.findBySubdomain] Procurando por subdomain=',
-      subdomain,
-    );
-    const domain = await this.domainModel.findOne({ subdomain });
-    console.log(
-      '[DomainService.findBySubdomain] Resultado:',
-      domain ? domain._id : 'NOT FOUND',
-    );
-    return domain;
+    return this.domainModel.findOne({ subdomain });
   }
 
   async findByHost(host: string) {
-    console.log(
-      '[DomainService.findByHost] Procurando por host/subdomain=',
-      host,
-    );
-    const domain = await this.domainModel.findOne({
-      $or: [{ subdomain: host }, { name: host }],
+    const h = this.n(host);
+    return this.domainModel.findOne({
+      $or: [
+        { name: h }, // domínio externo do cliente
+        { subdomain: h }, // subdomínio interno <slug>-<userId>.cloakerguard.com.br
+      ],
     });
-    console.log(
-      '[DomainService.findByHost] Resultado:',
-      domain ? domain._id : 'NOT FOUND',
-    );
-    return domain;
   }
 
   async countActiveByUser(userId: string) {
@@ -219,25 +171,39 @@ export class DomainService {
       .exec();
   }
 
-  // -------- Status/health --------
+  // -------- Helpers --------
 
   private async resolveCNAMEs(host: string): Promise<string[]> {
     const fqdn = this.n(host);
+
+    // 1. Tenta direto o CNAME
+    try {
+      const cn = await dns.resolveCname(fqdn);
+      if (cn.length) return cn.map((v) => this.n(v));
+    } catch (e: any) {
+      if (e.code !== 'ENODATA' && e.code !== 'ENOTFOUND') {
+        this.logger.warn(`[resolveCNAMEs] resolveCname falhou: ${e.message}`);
+      }
+    }
+
+    // 2. Fallback: resolveAny
     try {
       const any = await dns.resolveAny(fqdn);
-      const cn = any
+      const cname = any
         .filter((r: any) => r?.type === 'CNAME' && r?.value)
         .map((r: any) => this.n(r.value));
-      if (cn.length) return cn;
-    } catch (e) {
-      console.log(e);
+
+      if (cname.length) return cname;
+
+      // 🔥 se só tiver A/AAAA → o DNS já resolveu internamente
+      const hasA = any.some((r: any) => r?.type === 'A' || r?.type === 'AAAA');
+      if (hasA) return ['resolved-to-A'];
+    } catch (e: any) {
+      if (e.code !== 'ENODATA' && e.code !== 'ENOTFOUND') {
+        this.logger.warn(`[resolveCNAMEs] resolveAny falhou: ${e.message}`);
+      }
     }
-    try {
-      const cn2 = await dns.resolveCname(fqdn);
-      return (cn2 || []).map((v) => this.n(v));
-    } catch (e) {
-      console.log(e);
-    }
+
     return [];
   }
 
@@ -254,8 +220,12 @@ export class DomainService {
         signal: controller.signal,
       });
       clearTimeout(t);
-      if (res.ok) return { ok: true, status: res.status };
 
+      if (res.ok || (res.status >= 300 && res.status < 400)) {
+        return { ok: true, status: res.status };
+      }
+
+      // fallback GET
       const controller2 = new AbortController();
       const t2 = setTimeout(() => controller2.abort(), 4000);
       const res2 = await fetch(url, {
@@ -264,53 +234,46 @@ export class DomainService {
         signal: controller2.signal,
       });
       clearTimeout(t2);
-      return { ok: res2.ok, status: res2.status };
+
+      const ok = res2.ok || (res2.status >= 300 && res2.status < 400);
+      return { ok, status: res2.status };
     } catch {
       return { ok: false };
     }
   }
 
-  /** Atualiza status + tokens a partir do CF (útil pós-DV). */
-  async refreshCustomHostname(domainId: string) {
-    const domain = await this.domainModel.findById(domainId).exec();
-    if (!domain) throw new NotFoundException('Domain not found');
-    if (!(domain as any).customHostnameId) return { updated: false };
-
-    try {
-      const ch = await this.cloudflare.getCustomHostnameById(
-        (domain as any).customHostnameId,
-      );
-      await this.domainModel.findByIdAndUpdate(domainId, {
-        validationRecords: ch.ssl?.validation_records ?? [],
-      });
-      return { updated: true, sslStatus: ch.ssl?.status };
-    } catch (e) {
-      this.logger.warn(`refreshCustomHostname: ${String(e)}`);
-      return { updated: false };
-    }
-  }
+  // -------- Status --------
 
   async checkStatus(domainId: string) {
     const domain = await this.domainModel.findById(domainId).exec();
     if (!domain) throw new NotFoundException('Domain not found');
 
-    const expected = this.n(domain.content); // nosso subdomínio (target esperado)
-    const cnames = await this.resolveCNAMEs(domain.name);
-
     let status = EDomainStatus.PENDING;
     let reason = '';
 
+    const expected = this.n(this.EDGE_ORIGIN);
+    const cnames = await this.resolveCNAMEs(domain.name);
+
     if (cnames.length === 0) {
       status = EDomainStatus.PENDING;
-      reason = 'CNAME não encontrado para o domínio do cliente.';
+      reason = 'Nenhum registro DNS encontrado.';
+    } else if (cnames.includes('resolved-to-A')) {
+      const health = await this.httpHealth(domain.name);
+      if (health.ok) {
+        status = EDomainStatus.ACTIVE;
+      } else {
+        status = EDomainStatus.PROPAGATING;
+        reason =
+          'DNS resolvido para A/AAAA (sem CNAME visível), aguardando propagação/HTTP.';
+      }
     } else if (!cnames.includes(expected)) {
       status = EDomainStatus.ERROR;
       reason = `CNAME aponta para "${cnames[0]}", esperado "${expected}".`;
     } else {
-      // CNAME correto -> valida health HTTP (passando pelo EDGE)
       const health = await this.httpHealth(domain.name);
-      if (health.ok) status = EDomainStatus.ACTIVE;
-      else {
+      if (health.ok) {
+        status = EDomainStatus.ACTIVE;
+      } else {
         status = EDomainStatus.PROPAGATING;
         reason = 'CNAME correto, aguardando propagação/HTTP.';
       }
@@ -326,11 +289,5 @@ export class DomainService {
       reason: (domain as any).lastReason,
       checkedAt: (domain as any).lastCheckedAt,
     };
-  }
-
-  async getAcmeHttpBody(hostname: string): Promise<string | null> {
-    const ch = await this.cloudflare.getCustomHostnameByName(hostname);
-    const rec = ch?.ssl?.validation_records?.find((r) => r.http_body);
-    return rec?.http_body || null;
   }
 }

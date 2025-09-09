@@ -38,16 +38,13 @@ export class CloakerMiddleware implements NestMiddleware {
       const isInternal =
         host === 'cloakerguard.com.br' ||
         host === 'www.cloakerguard.com.br' ||
-        host === 'api.cloakerguard.com.br';
+        host === 'api.cloakerguard.com.br' ||
+        host === 'localhost';
 
       if (isInternal) return next();
 
-      // Procura domínio na base
-      const domain =
-        (await (this.domainService as any).findByHost?.(host)) ||
-        (await (this.domainService as any).findByName?.(host)) ||
-        (await this.domainService.findBySubdomain(host)) ||
-        null;
+      // Procura domínio na base (agora correto!)
+      const domain = await this.domainService.findByHost(host);
 
       if (!domain) {
         return res.status(404).json({
@@ -64,10 +61,10 @@ export class CloakerMiddleware implements NestMiddleware {
         (req.headers['referrer'] as string) ||
         '';
 
-      // Regra de bloqueio de user-agent
+      const rules: any = (domain as any).rules;
+
       const isBot =
-        (domain?.rules?.uaBlock &&
-          new RegExp(domain.rules.uaBlock, 'i').test(ua)) ||
+        (rules?.uaBlock && new RegExp(rules.uaBlock, 'i').test(ua)) ||
         /bot|crawl|slurp|spider|mediapartners|facebookexternalhit|headlesschrome|curl/i.test(
           ua,
         );
