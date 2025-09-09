@@ -21,12 +21,6 @@ function normalizeHost(raw = ''): string {
   return h;
 }
 
-function ensureHttpUrl(raw?: string): string | null {
-  if (!raw) return null;
-  const hasScheme = /^https?:\/\//i.test(raw);
-  return hasScheme ? raw : `https://${raw}`;
-}
-
 @Controller('domains')
 export class DomainController {
   constructor(private readonly domainService: DomainService) {}
@@ -34,29 +28,23 @@ export class DomainController {
   @Get('resolve')
   async resolve(@Query('host') host?: string) {
     const h = normalizeHost(host || '');
-    console.log('[DOMAINS/RESOLVE] Host recebido:', host, 'Normalizado:', h);
-
     if (!h) throw new NotFoundException('host query is required');
 
-    const domain = await this.domainService.findByHost(h);
+    const domain =
+      (await (this.domainService as any).findByHost?.(h)) ||
+      (await (this.domainService as any).findByName?.(h)) ||
+      (await this.domainService.findBySubdomain(h)) ||
+      null;
 
-    if (!domain) {
-      console.warn('[DOMAINS/RESOLVE] Não encontrou domain para host:', h);
-      throw new NotFoundException('Domain not found');
-    }
-
-    console.log('[DOMAINS/RESOLVE] Encontrado domain:', {
-      id: (domain as any)._id,
-      name: domain.name,
-      subdomain: (domain as any).subdomain,
-      whiteUrl: (domain as any).whiteUrl,
-      blackUrl: (domain as any).blackUrl,
-    });
+    if (!domain) throw new NotFoundException('Domain not found');
 
     return {
-      host: domain.name || h,
-      whiteOrigin: ensureHttpUrl((domain as any).whiteUrl) || null,
-      blackOrigin: ensureHttpUrl((domain as any).blackUrl) || null,
+      id: String((domain as any)._id),
+      userId: (domain as any).userId,
+      host: (domain as any).host || domain.name || h,
+      whiteOrigin: (domain as any).whiteOrigin || domain.whiteUrl || null,
+      blackOrigin: (domain as any).blackOrigin || domain.blackUrl || null,
+      rules: (domain as any).rules || {},
     };
   }
 

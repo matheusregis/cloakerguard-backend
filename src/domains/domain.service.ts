@@ -10,6 +10,12 @@ import * as dns from 'node:dns/promises';
 export class DomainService {
   private readonly logger = new Logger(DomainService.name);
 
+  private readonly EDGE_ORIGIN =
+    process.env.CLOAKER_EDGE_ORIGIN || 'edge.cloakerguard.com.br';
+  private readonly HEALTH_SCHEME = process.env.HEALTHCHECK_SCHEME || 'https';
+  private readonly HEALTH_PATH =
+    process.env.HEALTHCHECK_PATH || '/__edge-check';
+
   constructor(
     @InjectModel(Domain.name)
     private readonly domainModel: Model<DomainDocument>,
@@ -27,19 +33,16 @@ export class DomainService {
     const domain = await this.domainModel.create({
       name: externalFqdn,
       type: 'CNAME',
-      content: 'edge.cloakerguard.com.br',
+      content: this.EDGE_ORIGIN, // todos apontam para o edge
       whiteUrl: dto.whiteUrl,
       blackUrl: dto.blackUrl,
-      subdomain: `${externalFqdn.split('.')[0]}-${userId}.cloakerguard.com.br`,
+      subdomain: externalFqdn,
       userId,
       status: EDomainStatus.PENDING,
       createdAt: new Date(),
     });
 
-    this.logger.log(
-      `[createDomain] Criado domínio: ${domain.name} → ${domain.subdomain}`,
-    );
-    return domain;
+    return this.domainModel.findById(domain._id);
   }
 
   async updateDomain(
@@ -58,8 +61,7 @@ export class DomainService {
       )
       .exec();
 
-    if (!updated) throw new NotFoundException('Domain not found');
-    this.logger.log(`[updateDomain] Atualizado: ${updated.name}`);
+    if (!updated) throw new NotFoundException('Domain not found after update');
     return updated;
   }
 
@@ -68,9 +70,10 @@ export class DomainService {
     if (!domain) throw new NotFoundException('Domain not found');
 
     await this.domainModel.findByIdAndDelete(id).exec();
-    this.logger.warn(`[deleteDomain] Removido: ${domain.name}`);
     return { deleted: true };
   }
+
+  // -------- Queries usadas pelos controllers --------
 
   async findAllByUser(userId: string) {
     return this.domainModel.find({ userId });
@@ -80,22 +83,18 @@ export class DomainService {
     return this.domainModel.findById(id);
   }
 
+  async findByClient(clientId: string) {
+    return this.domainModel.find({ userId: clientId });
+  }
+
   async findBySubdomain(subdomain: string) {
-    const s = this.n(subdomain);
-    this.logger.debug(`[findBySubdomain] procurando por ${s}`);
-    return this.domainModel.findOne({ subdomain: s });
+    return this.domainModel.findOne({ subdomain });
   }
 
   async findByHost(host: string) {
-    const h = this.n(host);
-    this.logger.debug(`[findByHost] procurando por ${h}`);
-    const found = await this.domainModel.findOne({
-      $or: [{ name: h }, { subdomain: h }],
+    return this.domainModel.findOne({
+      $or: [{ subdomain: host }, { name: host }],
     });
-    this.logger.debug(
-      `[findByHost] resultado para ${h}: ${found ? found.name : 'NOT FOUND'}`,
-    );
-    return found;
   }
 
   async countActiveByUser(userId: string) {
@@ -104,45 +103,66 @@ export class DomainService {
       .exec();
   }
 
-  // -------- Status (simplificado) --------
+  // -------- Status/health --------
 
   private async resolveCNAMEs(host: string): Promise<string[]> {
     const fqdn = this.n(host);
     try {
-      const cn = await dns.resolveCname(fqdn);
-      if (cn.length) return cn.map((v) => this.n(v));
-    } catch (e: any) {
-      this.logger.warn(`[resolveCNAMEs] resolveCname falhou: ${e.code}`);
+      const cn2 = await dns.resolveCname(fqdn);
+      return (cn2 || []).map((v) => this.n(v));
+    } catch {
+      return [];
     }
-    return [];
+  }
+
+  private async httpHealth(
+    fqdn: string,
+  ): Promise<{ ok: boolean; status?: number }> {
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 4000);
+      const url = `${this.HEALTH_SCHEME}://${fqdn}${this.HEALTH_PATH}`;
+      const res = await fetch(url, {
+        method: 'HEAD',
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+      clearTimeout(t);
+      return { ok: res.ok, status: res.status };
+    } catch {
+      return { ok: false };
+    }
   }
 
   async checkStatus(domainId: string) {
     const domain = await this.domainModel.findById(domainId).exec();
     if (!domain) throw new NotFoundException('Domain not found');
 
+    const expected = this.n(this.EDGE_ORIGIN);
     const cnames = await this.resolveCNAMEs(domain.name);
+
     let status = EDomainStatus.PENDING;
     let reason = '';
 
     if (cnames.length === 0) {
       status = EDomainStatus.PENDING;
       reason = 'CNAME não encontrado.';
-    } else if (!cnames.includes(this.n(domain.content))) {
+    } else if (!cnames.includes(expected)) {
       status = EDomainStatus.ERROR;
-      reason = `Aponta para ${cnames[0]}, esperado ${domain.content}`;
+      reason = `CNAME aponta para "${cnames[0]}", esperado "${expected}".`;
     } else {
-      status = EDomainStatus.ACTIVE;
+      const health = await this.httpHealth(domain.name);
+      if (health.ok) status = EDomainStatus.ACTIVE;
+      else {
+        status = EDomainStatus.PROPAGATING;
+        reason = 'CNAME correto, aguardando propagação/HTTP.';
+      }
     }
 
     domain.status = status;
     (domain as any).lastReason = reason || undefined;
     (domain as any).lastCheckedAt = new Date();
     await domain.save();
-
-    this.logger.log(
-      `[checkStatus] ${domain.name} → ${status} (${reason || 'ok'})`,
-    );
 
     return {
       status,
