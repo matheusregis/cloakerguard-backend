@@ -31,21 +31,13 @@ function ensureHttpUrl(raw?: string): string | null {
 export class DomainController {
   constructor(private readonly domainService: DomainService) {}
 
-  /**
-   * Resolve qual domínio deve ser usado pelo Edge.
-   * Recebe ?host=promo.matheusregis.com.br
-   */
   @Get('resolve')
   async resolve(@Query('host') host?: string) {
     const h = normalizeHost(host || '');
     console.log('[DOMAINS/RESOLVE] Host recebido:', host, 'Normalizado:', h);
 
-    if (!h) {
-      console.warn('[DOMAINS/RESOLVE] Host vazio → 404');
-      throw new NotFoundException('host query is required');
-    }
+    if (!h) throw new NotFoundException('host query is required');
 
-    // 🔑 Busca correta: usa findByHost (que cobre name + subdomain)
     const domain = await this.domainService.findByHost(h);
 
     if (!domain) {
@@ -65,7 +57,6 @@ export class DomainController {
       host: domain.name || h,
       whiteOrigin: ensureHttpUrl((domain as any).whiteUrl) || null,
       blackOrigin: ensureHttpUrl((domain as any).blackUrl) || null,
-      rules: (domain as any).rules || {},
     };
   }
 
