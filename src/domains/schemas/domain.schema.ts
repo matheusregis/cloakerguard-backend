@@ -9,6 +9,14 @@ export enum EDomainStatus {
   ERROR = 'ERROR',
 }
 
+export enum ECertStatus {
+  NONE = 'NONE',
+  PENDING = 'PENDING',
+  DNS01_NEEDED = 'DNS01_NEEDED',
+  READY = 'READY',
+  FAILED = 'FAILED',
+}
+
 export type ValidationRecord = {
   txt_name?: string;
   txt_value?: string;
@@ -20,12 +28,12 @@ export type ValidationRecord = {
 export class Domain {
   @Prop({ required: true }) name!: string; // FQDN externo (ex: promo.matheusregis.com.br)
   @Prop() type?: string; // tipo do DNS do cliente (ex: CNAME)
-  @Prop() content?: string; // target esperado (ex: <label>.cloakerguard.com.br)
+  @Prop() content?: string; // target esperado (ex: edge.cloakerguard.com.br)
   @Prop() whiteUrl?: string;
   @Prop() blackUrl?: string;
   @Prop({ default: false }) proxied?: boolean;
 
-  @Prop() subdomain?: string; // nosso subdomínio interno (ex: <label>.cloakerguard.com.br)
+  @Prop() subdomain?: string; // aqui você estava salvando o próprio FQDN externo
   @Prop({ required: true }) userId!: string;
 
   @Prop({ type: String, enum: EDomainStatus, default: EDomainStatus.PENDING })
@@ -34,9 +42,22 @@ export class Domain {
   @Prop() lastReason?: string;
   @Prop() lastCheckedAt?: Date;
 
-  // 🔽 NECESSÁRIO p/ integração com Custom Hostnames
-  @Prop() customHostnameId?: string;
+  // 🔽 NECESSÁRIO p/ integração com emissão de cert no Fly
+  @Prop({ type: String, enum: ECertStatus, default: ECertStatus.NONE })
+  certStatus!: ECertStatus;
 
+  @Prop() flyCertClientStatus?: string; // espelha clientStatus do Fly (debug)
+  @Prop() flyCertConfigured?: boolean; // espelha configured do Fly (debug)
+  @Prop() acmeMethod?: 'HTTP01' | 'ALPN' | 'DNS01';
+
+  // DNS-01 (quando o Fly pedir)
+  @Prop() acmeDnsCnameName?: string; // _acme-challenge.host
+  @Prop() acmeDnsCnameTarget?: string; // <token>.flydns.net
+
+  // opcional: id do cert no Fly se quiser rastrear
+  @Prop() flyCertificateId?: string;
+
+  // legado útil p/ exibir instruções
   @Prop({
     type: [
       {
@@ -53,5 +74,5 @@ export class Domain {
   @Prop({ default: Date.now }) createdAt?: Date;
 }
 
-export type DomainDocument = Domain & Document;
+export type DomainDocument = Document & Domain;
 export const DomainSchema = SchemaFactory.createForClass(Domain);

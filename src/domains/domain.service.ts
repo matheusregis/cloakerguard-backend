@@ -1,10 +1,17 @@
+// src/domains/domain.service.ts
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { Domain, DomainDocument, EDomainStatus } from './schemas/domain.schema';
+import {
+  Domain,
+  DomainDocument,
+  ECertStatus,
+  EDomainStatus,
+} from './schemas/domain.schema';
 import { CreateDNSRecordDto } from './dto/create-dns.dto';
 import { UpdateDNSRecordDto } from './dto/update-dns.dto';
 import * as dns from 'node:dns/promises';
+import { FlyCertificatesService } from './fly/fly.service';
 
 @Injectable()
 export class DomainService {
@@ -16,9 +23,14 @@ export class DomainService {
   private readonly HEALTH_PATH =
     process.env.HEALTHCHECK_PATH || '/__edge-check';
 
+  // app do Fly que roda o NGINX (onde os certs precisam estar)
+  private readonly FLY_APP =
+    process.env.FLY_APP_FOR_CERTS || 'proxy-cloakerguard';
+
   constructor(
     @InjectModel(Domain.name)
     private readonly domainModel: Model<DomainDocument>,
+    private readonly fly: FlyCertificatesService,
   ) {}
 
   private n(v?: string) {
@@ -30,7 +42,7 @@ export class DomainService {
   async createDomain(dto: CreateDNSRecordDto, userId: string) {
     const externalFqdn = this.n(dto.name);
 
-    const domain = await this.domainModel.create({
+    let domain = (await this.domainModel.create({
       name: externalFqdn,
       type: 'CNAME',
       content: this.EDGE_ORIGIN, // todos apontam para o edge
@@ -39,8 +51,12 @@ export class DomainService {
       subdomain: externalFqdn,
       userId,
       status: EDomainStatus.PENDING,
+      certStatus: ECertStatus.PENDING,
       createdAt: new Date(),
-    });
+    })) as DomainDocument;
+
+    // Emite/garante certificado no Fly (2A)
+    domain = await this.ensureFlyCertificate(domain);
 
     return this.domainModel.findById(domain._id);
   }
@@ -62,6 +78,15 @@ export class DomainService {
       .exec();
 
     if (!updated) throw new NotFoundException('Domain not found after update');
+
+    // Se mudou hostname, reemite/garante cert
+    if (dto.name && this.n(dto.name) !== this.n(updated.name)) {
+      updated.name = this.n(dto.name);
+      updated.certStatus = ECertStatus.PENDING;
+      await updated.save();
+      await this.ensureFlyCertificate(updated);
+    }
+
     return updated;
   }
 
@@ -70,6 +95,7 @@ export class DomainService {
     if (!domain) throw new NotFoundException('Domain not found');
 
     await this.domainModel.findByIdAndDelete(id).exec();
+    // opcional: remover cert no Fly (tem mutation pra isso). Mantive simples.
     return { deleted: true };
   }
 
@@ -103,6 +129,62 @@ export class DomainService {
       .exec();
   }
 
+  // -------- Certificados (Fly) --------
+
+  private async ensureFlyCertificate(domain: DomainDocument) {
+    try {
+      const hostname = this.n(domain.name);
+
+      // 1) Cria/garante o certificado
+      const add = await this.fly.addCertificate(this.FLY_APP, hostname);
+
+      // decide método de validação suportado
+      const httpOK = !!add.isAcmeHttpConfigured || !!add.acmeAlpnConfigured;
+      const dnsConfigured = !!add.acmeDnsConfigured;
+
+      if (!httpOK && !dnsConfigured) {
+        // Fly quer DNS-01: guardar CNAME de challenge
+        domain.certStatus = ECertStatus.DNS01_NEEDED;
+        domain.acmeMethod = 'DNS01';
+        domain.acmeDnsCnameName = add.dnsValidationHostname || undefined;
+        domain.acmeDnsCnameTarget = add.dnsValidationTarget || undefined;
+
+        // também salva no legacy validationRecords p/ UI
+        const recs = domain.validationRecords || [];
+        if (add.dnsValidationHostname && add.dnsValidationTarget) {
+          recs.push({
+            txt_name: add.dnsValidationHostname, // é CNAME, mas serve p/ exibição
+            txt_value: add.dnsValidationTarget,
+          });
+        }
+        domain.validationRecords = recs;
+        await domain.save();
+        return domain;
+      }
+
+      // 2) Se HTTP/ALPN possível, checa estado atual
+      const chk = await this.fly.checkCertificate(this.FLY_APP, hostname);
+
+      domain.flyCertClientStatus = chk.clientStatus || undefined;
+      domain.flyCertConfigured = !!chk.configured;
+
+      if (chk.clientStatus === 'Ready' && chk.configured) {
+        domain.certStatus = ECertStatus.READY;
+      } else {
+        domain.certStatus = ECertStatus.PENDING;
+      }
+
+      await domain.save();
+      return domain;
+    } catch (e: any) {
+      this.logger.error(`ensureFlyCertificate error: ${e?.message || e}`);
+      domain.certStatus = ECertStatus.FAILED;
+      domain.lastReason = `Fly cert error: ${e?.message || 'unknown'}`;
+      await domain.save();
+      return domain;
+    }
+  }
+
   // -------- Status/health --------
 
   private async resolveCNAMEs(host: string): Promise<string[]> {
@@ -110,7 +192,7 @@ export class DomainService {
     try {
       const cn2 = await dns.resolveCname(fqdn);
       return (cn2 || []).map((v) => this.n(v));
-    } catch {
+    } catch (e) {
       return [];
     }
   }
@@ -141,6 +223,7 @@ export class DomainService {
     const expected = this.n(this.EDGE_ORIGIN);
     const cnames = await this.resolveCNAMEs(domain.name);
 
+    // Atualiza status baseado no CNAME + certificado
     let status = EDomainStatus.PENDING;
     let reason = '';
 
@@ -151,11 +234,51 @@ export class DomainService {
       status = EDomainStatus.ERROR;
       reason = `CNAME aponta para "${cnames[0]}", esperado "${expected}".`;
     } else {
-      const health = await this.httpHealth(domain.name);
-      if (health.ok) status = EDomainStatus.ACTIVE;
-      else {
+      // CNAME OK → checar cert e health
+      // Atualiza snapshot do cert no Fly
+      try {
+        const chk = await this.fly.checkCertificate(
+          this.FLY_APP,
+          this.n(domain.name),
+        );
+        domain.flyCertClientStatus = chk.clientStatus || undefined;
+        domain.flyCertConfigured = !!chk.configured;
+
+        if (chk.clientStatus === 'Ready' && chk.configured) {
+          domain.certStatus = ECertStatus.READY;
+        } else if (
+          chk.dnsValidationHostname &&
+          chk.dnsValidationTarget &&
+          !chk.isAcmeHttpConfigured &&
+          !chk.acmeAlpnConfigured
+        ) {
+          domain.certStatus = ECertStatus.DNS01_NEEDED;
+          domain.acmeMethod = 'DNS01';
+          domain.acmeDnsCnameName = chk.dnsValidationHostname;
+          domain.acmeDnsCnameTarget = chk.dnsValidationTarget;
+        } else {
+          domain.certStatus = ECertStatus.PENDING;
+        }
+      } catch (e: any) {
+        this.logger.warn(`checkStatus: fly check failed: ${e?.message || e}`);
+      }
+
+      // Se o cert já está pronto, faz health
+      if (domain.certStatus === ECertStatus.READY) {
+        const health = await this.httpHealth(domain.name);
+        if (health.ok) status = EDomainStatus.ACTIVE;
+        else {
+          status = EDomainStatus.PROPAGATING;
+          reason = 'CNAME correto e cert pronto, aguardando saúde HTTP.';
+        }
+      } else if (domain.certStatus === ECertStatus.DNS01_NEEDED) {
+        status = EDomainStatus.PENDING;
+        reason =
+          'CNAME correto. Necessário criar CNAME do _acme-challenge (DNS-01).';
+      } else {
         status = EDomainStatus.PROPAGATING;
-        reason = 'CNAME correto, aguardando propagação/HTTP.';
+        reason =
+          'CNAME correto. Certificado em emissão (HTTP/ALPN) no Fly (aguarde).';
       }
     }
 
@@ -166,8 +289,20 @@ export class DomainService {
 
     return {
       status,
+      certStatus: domain.certStatus,
       reason: (domain as any).lastReason,
       checkedAt: (domain as any).lastCheckedAt,
+      dns01:
+        domain.certStatus === ECertStatus.DNS01_NEEDED
+          ? {
+              cnameName: domain.acmeDnsCnameName,
+              cnameTarget: domain.acmeDnsCnameTarget,
+            }
+          : undefined,
+      fly: {
+        clientStatus: domain.flyCertClientStatus,
+        configured: domain.flyCertConfigured,
+      },
     };
   }
 }

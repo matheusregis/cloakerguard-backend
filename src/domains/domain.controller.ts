@@ -1,3 +1,4 @@
+// src/domains/domain.controller.ts
 import {
   Body,
   Controller,
@@ -39,12 +40,12 @@ export class DomainController {
     if (!domain) throw new NotFoundException('Domain not found');
 
     return {
-      id: String((domain as any)._id),
-      userId: (domain as any).userId,
-      host: (domain as any).host || domain.name || h,
-      whiteOrigin: (domain as any).whiteOrigin || domain.whiteUrl || null,
-      blackOrigin: (domain as any).blackOrigin || domain.blackUrl || null,
-      rules: (domain as any).rules || {},
+      id: String(domain._id),
+      userId: domain.userId,
+      host: domain.host || domain.name || h,
+      whiteOrigin: domain.whiteOrigin || domain.whiteUrl || null,
+      blackOrigin: domain.blackOrigin || domain.blackUrl || null,
+      rules: domain.rules || {},
     };
   }
 
