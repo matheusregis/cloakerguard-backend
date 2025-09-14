@@ -266,8 +266,10 @@ export class DomainService {
       // Se o cert já está pronto, faz health
       if (domain.certStatus === ECertStatus.READY) {
         const health = await this.httpHealth(domain.name);
-        if (health.ok) status = EDomainStatus.ACTIVE;
-        else {
+        if (health.ok) {
+          status = EDomainStatus.ACTIVE;
+          reason = 'Domínio ativo e saudável.';
+        } else {
           status = EDomainStatus.PROPAGATING;
           reason = 'CNAME correto e cert pronto, aguardando saúde HTTP.';
         }
