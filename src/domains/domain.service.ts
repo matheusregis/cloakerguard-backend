@@ -205,7 +205,7 @@ export class DomainService {
       const t = setTimeout(() => controller.abort(), 4000);
       const url = `${this.HEALTH_SCHEME}://${fqdn}${this.HEALTH_PATH}`;
       const res = await fetch(url, {
-        method: 'HEAD',
+        method: 'GET',
         redirect: 'manual',
         signal: controller.signal,
       });
