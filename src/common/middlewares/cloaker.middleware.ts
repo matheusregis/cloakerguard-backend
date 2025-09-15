@@ -22,7 +22,7 @@ export class CloakerMiddleware implements NestMiddleware {
   constructor(
     private readonly domainService: DomainService,
     private readonly logService: CloakerLogService,
-    private readonly analytics: AnalyticsService,
+    private readonly analytics: AnalyticsService, // vamos usar tbm pra checar limites
   ) {}
 
   async use(req: Request, res: Response, next: NextFunction) {
@@ -43,7 +43,7 @@ export class CloakerMiddleware implements NestMiddleware {
 
       if (isInternal) return next();
 
-      // Procura domínio na base (agora correto!)
+      // Procura domínio na base
       const domain = await this.domainService.findByHost(host);
 
       if (!domain) {
@@ -51,6 +51,32 @@ export class CloakerMiddleware implements NestMiddleware {
           error: 'Domain not managed',
           host,
         });
+      }
+
+      // Checagem de plano/limites
+      const usage = await this.analytics.getUserPlanUsage(domain.userId);
+      // Esperado: { monthlyClicksUsed, monthlyClicksLimit, activeDomainsUsed, activeDomainsLimit }
+
+      if (usage) {
+        // Bloqueio por cliques
+        if (usage.monthlyClicksUsed >= usage.monthlyClicksLimit) {
+          return res.status(402).json({
+            error: 'PLAN_CLICKS_LIMIT',
+            message:
+              'Você atingiu o limite de cliques do seu plano. Faça upgrade.',
+          });
+          // ou redirect:
+          // return res.redirect('https://cloakerguard.com.br/pricing');
+        }
+
+        // Bloqueio por domínios
+        if (usage.activeDomainsUsed > usage.activeDomainsLimit) {
+          return res.status(402).json({
+            error: 'PLAN_DOMAINS_LIMIT',
+            message:
+              'Você atingiu o limite de domínios ativos no seu plano. Faça upgrade.',
+          });
+        }
       }
 
       const xfwd = (req.headers['x-forwarded-for'] as string) || '';
@@ -107,7 +133,7 @@ export class CloakerMiddleware implements NestMiddleware {
         });
       }
 
-      // Logs e analytics (assíncronos)
+      // Logs e analytics (só salva se passou nas checagens de plano)
       void this.logService.create({
         subdomain: host,
         ip,

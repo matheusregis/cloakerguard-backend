@@ -1,3 +1,4 @@
+// src/modules/analytics/analytics.service.ts
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -46,7 +47,8 @@ export class AnalyticsService {
     );
   }
 
-  // ====== Dashboard ======
+  // ====== Dashboard helpers ======
+
   async getMonthlyTotals(userId: string, year: number, month: number) {
     const [row] = await this.dsModel.aggregate([
       { $match: { userId, y: year, m: month } },
@@ -118,8 +120,12 @@ export class AnalyticsService {
     ]);
   }
 
-  // Limites e ciclo vêm do módulo de pagamentos
-  async getPlanUsage(userId: string, year: number, month: number) {
+  // ====== Plano e limites ======
+  async getPlanUsage(userId: string) {
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const month = now.getUTCMonth() + 1;
+
     const totals = await this.getMonthlyTotals(userId, year, month);
     const sub = await this.paymentsApp.getActiveSubscriptionSummary(userId);
 
@@ -129,6 +135,7 @@ export class AnalyticsService {
       activeDomainsUsed: await this.getActiveDomainsCount(userId),
       activeDomainsLimit: sub?.limits?.activeDomainsLimit ?? 0,
       cycleEndsAt: sub?.period_end ?? null,
+      planName: sub?.plan?.name ?? sub?.plan?.code ?? 'Plano',
     };
   }
 }

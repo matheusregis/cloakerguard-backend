@@ -31,22 +31,12 @@ export class DomainController {
     const h = normalizeHost(host || '');
     if (!h) throw new NotFoundException('host query is required');
 
-    const domain =
-      (await (this.domainService as any).findByHost?.(h)) ||
-      (await (this.domainService as any).findByName?.(h)) ||
-      (await this.domainService.findBySubdomain(h)) ||
-      null;
+    // usa método novo do service, que já retorna domain + planUsage
+    const resolved = await this.domainService.resolveDomain(h);
 
-    if (!domain) throw new NotFoundException('Domain not found');
+    if (!resolved) throw new NotFoundException('Domain not found');
 
-    return {
-      id: String(domain._id),
-      userId: domain.userId,
-      host: domain.host || domain.name || h,
-      whiteOrigin: domain.whiteOrigin || domain.whiteUrl || null,
-      blackOrigin: domain.blackOrigin || domain.blackUrl || null,
-      rules: domain.rules || {},
-    };
+    return resolved;
   }
 
   @Post(':clientId')
