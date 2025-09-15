@@ -1,5 +1,4 @@
-// src/modules/analytics/analytics.module.ts
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Hit, HitSchema } from './schemas/hit.schema';
 import { DailyStats, DailyStatsSchema } from './schemas/daily-stats.schema';
@@ -15,7 +14,7 @@ import { DomainModule } from '../../domains/domain.module';
       { name: DailyStats.name, schema: DailyStatsSchema },
     ]),
     PaymentsModule,
-    DomainModule,
+    forwardRef(() => DomainModule), // ✅ evita ciclo
   ],
   providers: [AnalyticsService],
   controllers: [AnalyticsController],

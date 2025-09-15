@@ -1,5 +1,10 @@
-// src/domains/domain.service.ts
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import {
@@ -12,7 +17,7 @@ import { CreateDNSRecordDto } from './dto/create-dns.dto';
 import { UpdateDNSRecordDto } from './dto/update-dns.dto';
 import * as dns from 'node:dns/promises';
 import { FlyCertificatesService } from './fly/fly.service';
-import { AnalyticsService } from '../modules/analytics/analytics.service'; // 🔑 usado p/ limites
+import { AnalyticsService } from '../modules/analytics/analytics.service';
 
 @Injectable()
 export class DomainService {
@@ -30,7 +35,7 @@ export class DomainService {
     @InjectModel(Domain.name)
     private readonly domainModel: Model<DomainDocument>,
     private readonly fly: FlyCertificatesService,
-    private readonly analytics: AnalyticsService, // injeta service de analytics
+    private readonly analytics: AnalyticsService,
   ) {}
 
   private n(v?: string) {
@@ -40,12 +45,32 @@ export class DomainService {
   // -------- CRUD --------
 
   async createDomain(dto: CreateDNSRecordDto, userId: string) {
+    if (!dto?.name) {
+      throw new BadRequestException('Nome do domínio é obrigatório.');
+    }
+
     const externalFqdn = this.n(dto.name);
+
+    // valida limites de plano
+    const usage = await this.analytics.getPlanUsage(userId);
+    const activeDomainsLimit = usage.activeDomainsLimit ?? 0;
+    const activeDomainsUsed = usage.activeDomainsUsed ?? 0;
+
+    if (activeDomainsLimit === 0) {
+      throw new ForbiddenException(
+        'Seu plano atual não permite cadastrar domínios. Faça upgrade para liberar.',
+      );
+    }
+    if (activeDomainsUsed >= activeDomainsLimit) {
+      throw new ForbiddenException(
+        `Limite de ${activeDomainsLimit} domínios atingido. Faça upgrade para adicionar mais.`,
+      );
+    }
 
     let domain = (await this.domainModel.create({
       name: externalFqdn,
       type: 'CNAME',
-      content: this.EDGE_ORIGIN, // todos apontam para o edge
+      content: this.EDGE_ORIGIN,
       whiteUrl: dto.whiteUrl,
       blackUrl: dto.blackUrl,
       subdomain: externalFqdn,
@@ -56,7 +81,6 @@ export class DomainService {
     })) as DomainDocument;
 
     domain = await this.ensureFlyCertificate(domain);
-
     return this.domainModel.findById(domain._id);
   }
 
@@ -133,8 +157,6 @@ export class DomainService {
     if (!domain) throw new NotFoundException('Domain not found');
 
     const userId = domain.userId;
-
-    // uso de cliques (service de analytics retorna { used, limit, domainsLimit })
     const planUsage = await this.analytics.getPlanUsage(userId);
 
     return {
@@ -192,8 +214,17 @@ export class DomainService {
       return domain;
     } catch (e: any) {
       this.logger.error(`ensureFlyCertificate error: ${e?.message || e}`);
-      domain.certStatus = ECertStatus.FAILED;
-      domain.lastReason = `Fly cert error: ${e?.message || 'unknown'}`;
+
+      // 🔑 Diferenciar entre "não tem CNAME ainda" e erro real de emissão
+      const cnames = await this.resolveCNAMEs(domain.name);
+      if (cnames.length === 0) {
+        domain.certStatus = ECertStatus.PENDING;
+        domain.lastReason = 'Aguardando configuração de DNS (CNAME).';
+      } else {
+        domain.certStatus = ECertStatus.FAILED;
+        domain.lastReason = `Fly cert error: ${e?.message || 'unknown'}`;
+      }
+
       await domain.save();
       return domain;
     }
@@ -230,6 +261,7 @@ export class DomainService {
     }
   }
 
+  // -------- Status/health --------
   async checkStatus(domainId: string) {
     const domain = await this.domainModel.findById(domainId).exec();
     if (!domain) throw new NotFoundException('Domain not found');
@@ -248,6 +280,14 @@ export class DomainService {
       reason = `CNAME aponta para "${cnames[0]}", esperado "${expected}".`;
     } else {
       try {
+        // 🔑 se nunca criou cert, garante criação
+        if (
+          !domain.flyCertConfigured ||
+          domain.certStatus === ECertStatus.FAILED
+        ) {
+          await this.ensureFlyCertificate(domain);
+        }
+
         const chk = await this.fly.checkCertificate(
           this.FLY_APP,
           this.n(domain.name),
@@ -272,6 +312,8 @@ export class DomainService {
         }
       } catch (e: any) {
         this.logger.warn(`checkStatus: fly check failed: ${e?.message || e}`);
+        // 🚨 força criar o cert se ainda não existir
+        await this.ensureFlyCertificate(domain);
       }
 
       if (domain.certStatus === ECertStatus.READY) {

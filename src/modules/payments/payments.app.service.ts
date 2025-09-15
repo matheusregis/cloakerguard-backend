@@ -33,7 +33,7 @@ const PLAN_PRESETS: Record<
     activeDomainsLimit: 20,
   },
   Elite: { amount: 59700, monthlyClicksLimit: null, activeDomainsLimit: null },
-  Free: { amount: 0, monthlyClicksLimit: 5_000, activeDomainsLimit: 1 }, // fallback
+  Free: { amount: 0, monthlyClicksLimit: 0, activeDomainsLimit: 0 }, // fallback
 };
 
 @Injectable()
