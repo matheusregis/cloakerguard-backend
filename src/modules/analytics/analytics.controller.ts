@@ -40,7 +40,7 @@ export class AnalyticsController {
     const successRate = totals.total ? totals.passed / totals.total : 0;
 
     const activeDomainsCount = await this.domains.countActiveByUser(userId);
-    const plan = await this.svc.getPlanUsage(userId, y, m);
+    const plan = await this.svc.getPlanUsage(userId);
     const planUsage = { ...plan, activeDomainsUsed: activeDomainsCount };
 
     return {

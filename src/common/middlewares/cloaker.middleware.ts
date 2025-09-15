@@ -54,7 +54,7 @@ export class CloakerMiddleware implements NestMiddleware {
       }
 
       // Checagem de plano/limites
-      const usage = await this.analytics.getUserPlanUsage(domain.userId);
+      const usage = await this.analytics.getPlanUsage(domain.userId);
       // Esperado: { monthlyClicksUsed, monthlyClicksLimit, activeDomainsUsed, activeDomainsLimit }
 
       if (usage) {

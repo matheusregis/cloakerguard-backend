@@ -134,18 +134,8 @@ export class DomainService {
 
     const userId = domain.userId;
 
-    // domínios ativos
-    const activeDomainsUsed = await this.countActiveByUser(userId);
-
     // uso de cliques (service de analytics retorna { used, limit, domainsLimit })
-    const clicks = await this.analytics.getMonthlyUsage(userId);
-
-    const planUsage = {
-      monthlyClicksUsed: clicks.used,
-      monthlyClicksLimit: clicks.limit,
-      activeDomainsUsed,
-      activeDomainsLimit: clicks.domainsLimit,
-    };
+    const planUsage = await this.analytics.getPlanUsage(userId);
 
     return {
       id: String(domain._id),
